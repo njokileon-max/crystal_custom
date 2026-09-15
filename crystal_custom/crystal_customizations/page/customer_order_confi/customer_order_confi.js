@@ -15,6 +15,7 @@ class OrderConfirmationManager {
         this.submitted_orders = [];
         this.called_orders = new Set();
         this.not_picked_orders = new Set();
+        this.declined_orders = new Set();
         this._editor_items = {};
         this.current_page = 1;
         this.page_size = 50;
@@ -73,7 +74,7 @@ class OrderConfirmationManager {
             label: 'Status',
             fieldtype: 'Select',
             fieldname: 'status_filter',
-            options: '\nAll\nPending Call\nCalled\nNot Picked',
+            options: '\nAll\nPending Call\nCalled\nNot Picked\nDeclined',
             default: 'All',
             change: () => this.apply_filters()
         });
@@ -173,18 +174,14 @@ class OrderConfirmationManager {
                 return false;
             }
             if (this.filters.status && this.filters.status !== 'All') {
-                const is_called = this.called_orders.has(order.name);
+                const is_called     = this.called_orders.has(order.name);
                 const is_not_picked = this.not_picked_orders.has(order.name);
-                
-                if (this.filters.status === 'Pending Call' && (is_called || is_not_picked)) {
-                    return false;
-                }
-                if (this.filters.status === 'Called' && !is_called) {
-                    return false;
-                }
-                if (this.filters.status === 'Not Picked' && !is_not_picked) {
-                    return false;
-                }
+                const is_declined   = this.declined_orders.has(order.name);
+
+                if (this.filters.status === 'Pending Call'  && (is_called || is_not_picked || is_declined)) return false;
+                if (this.filters.status === 'Called'        && !is_called)     return false;
+                if (this.filters.status === 'Not Picked'    && !is_not_picked) return false;
+                if (this.filters.status === 'Declined'      && !is_declined)   return false;
             }
             return true;
         });
@@ -223,10 +220,11 @@ class OrderConfirmationManager {
         }
 
         const total_value = all_filtered.reduce((sum, o) => sum + o.grand_total, 0);
-        const called_count = all_filtered.filter(o => this.called_orders.has(o.name)).length;
+        const called_count     = all_filtered.filter(o => this.called_orders.has(o.name)).length;
         const not_picked_count = all_filtered.filter(o => this.not_picked_orders.has(o.name)).length;
-        const pending_count = all_filtered.filter(o =>
-            !this.called_orders.has(o.name) && !this.not_picked_orders.has(o.name)
+        const declined_count   = all_filtered.filter(o => this.declined_orders.has(o.name)).length;
+        const pending_count    = all_filtered.filter(o =>
+            !this.called_orders.has(o.name) && !this.not_picked_orders.has(o.name) && !this.declined_orders.has(o.name)
         ).length;
         
         let html = `
@@ -266,6 +264,19 @@ class OrderConfirmationManager {
                         <div class="summary-content">
                             <div class="summary-label">Not Picked</div>
                             <div class="summary-value">${not_picked_count}</div>
+                        </div>
+                    </div>
+                    <div class="summary-item">
+                        <div class="summary-icon" style="background: linear-gradient(135deg, #6b7280 0%, #374151 100%);">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="12" cy="12" r="10"></circle>
+                                <line x1="15" y1="9" x2="9" y2="15"></line>
+                                <line x1="9" y1="9" x2="15" y2="15"></line>
+                            </svg>
+                        </div>
+                        <div class="summary-content">
+                            <div class="summary-label">Declined</div>
+                            <div class="summary-value">${declined_count}</div>
                         </div>
                     </div>
                     <div class="summary-item">
@@ -327,9 +338,11 @@ class OrderConfirmationManager {
             grp.forEach(order => {
                 const is_called     = this.called_orders.has(order.name);
                 const is_not_picked = this.not_picked_orders.has(order.name);
+                const is_declined   = this.declined_orders.has(order.name);
+                const is_actioned   = is_called || is_not_picked || is_declined;
 
                 html += `
-                <tr class="order-row ${is_called ? 'order-called' : ''} ${is_not_picked ? 'order-not-picked' : ''}"
+                <tr class="order-row ${is_called ? 'order-called' : ''} ${is_not_picked ? 'order-not-picked' : ''} ${is_declined ? 'order-declined' : ''}"
                     data-order="${order.name}">
                     <td>
                         <span class="toggle-details" style="cursor:pointer; font-size: 16px;">▶</span>
@@ -352,20 +365,27 @@ class OrderConfirmationManager {
                     <td>
                         <div class="action-buttons">
                             <button class="btn btn-sm ${is_called ? 'btn-success' : 'btn-primary'} btn-mark-called"
-                                    data-order="${order.name}" ${is_called ? 'disabled' : ''}>
+                                    data-order="${order.name}" ${is_actioned ? 'disabled' : ''}>
                                 ${is_called ? '✓ Called' : 'Mark Called'}
                             </button>
                             <button class="btn btn-sm ${is_not_picked ? 'btn-danger' : 'btn-warning'} btn-not-picked"
-                                    data-order="${order.name}" ${is_called ? 'disabled' : ''}>
+                                    data-order="${order.name}" ${is_actioned ? 'disabled' : ''}>
                                 ${is_not_picked ? '✓ Not Picked' : 'Not Picked'}
+                            </button>
+                            <button class="btn btn-sm ${is_declined ? 'btn-default' : 'btn-default'} btn-declined"
+                                    data-order="${order.name}" ${is_actioned ? 'disabled' : ''}
+                                    style="${is_declined ? 'color:#6b7280;' : 'color:#6b7280;border-color:#d1d5db;'}">
+                                ${is_declined ? '✕ Declined' : 'Customer Declined'}
                             </button>
                         </div>
                     </td>
                     <td>
                         ${is_called ?
                             '<span class="status-badge status-called">Ready to Submit</span>' :
-                            is_not_picked ?
+                        is_not_picked ?
                             '<span class="status-badge status-not-picked">Call Not Picked</span>' :
+                        is_declined ?
+                            '<span class="status-badge status-declined">Customer Declined</span>' :
                             '<span class="status-badge status-pending">Pending Call</span>'}
                     </td>
                 </tr>
@@ -605,6 +625,20 @@ class OrderConfirmationManager {
                 .status-not-picked {
                     background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
                     color: white;
+                }
+
+                .status-declined {
+                    background: linear-gradient(135deg, #6b7280 0%, #374151 100%);
+                    color: white;
+                }
+
+                .order-row.order-declined {
+                    opacity: 0.65;
+                }
+
+                .order-row.order-declined:hover {
+                    background-color: #f9fafb !important;
+                    border-left-color: #9ca3af;
                 }
                 
                 .region-tag {
@@ -855,6 +889,12 @@ class OrderConfirmationManager {
         this.container.find('.btn-not-picked').off('click').on('click', function() {
             const order_name = $(this).data('order');
             self.mark_as_not_picked(order_name, $(this));
+        });
+
+        // Customer declined
+        this.container.find('.btn-declined').off('click').on('click', function() {
+            const order_name = $(this).data('order');
+            self.mark_as_declined(order_name, $(this));
         });
     }
 
@@ -1244,15 +1284,114 @@ class OrderConfirmationManager {
         );
     }
 
+    mark_as_declined(order_name, $btn) {
+        frappe.prompt([{
+            label: 'Reason for declining (optional)',
+            fieldname: 'reason',
+            fieldtype: 'Small Text',
+            description: 'This will be saved on the order as a call note',
+        }], (vals) => {
+            // Optimistic UI: mark locally and disable buttons immediately
+            this.declined_orders.add(order_name);
+            const $row = $(`.order-row[data-order="${order_name}"]`);
+            $row.addClass('order-declined')
+                .find('.action-buttons .btn').prop('disabled', true);
+            $row.find('.status-badge')
+                .removeClass('status-pending status-called status-not-picked')
+                .addClass('status-declined')
+                .text('Customer Declined');
+            $btn.text('✕ Declined');
+
+            const reason = vals.reason ? `Customer declined — ${vals.reason}` : 'Customer declined';
+            frappe.call({
+                method: 'crystal_custom.crystal_customizations.page.customer_order_confi.customer_order_confi.cancel_order',
+                args: { order_name, reason },
+                callback: (r) => {
+                    if (!r.message) return;
+                    // Remove from local orders list
+                    this.orders = this.orders.filter(o => o.name !== order_name);
+                    this.called_orders.delete(order_name);
+                    this.not_picked_orders.delete(order_name);
+                    this.declined_orders.delete(order_name);
+                    delete this._editor_items[order_name];
+                    frappe.show_alert({
+                        message: __('Order {0} declined and cancelled', [order_name]),
+                        indicator: 'orange',
+                    });
+                    this.render_orders();
+                },
+                error: () => {
+                    // Rollback optimistic update on failure
+                    this.declined_orders.delete(order_name);
+                    this.render_orders();
+                    frappe.msgprint({ title: __('Error'), message: __('Could not cancel order {0}. Please try again.', [order_name]), indicator: 'red' });
+                },
+            });
+        }, __('Customer Declined — {0}', [order_name]), __('Decline Order'));
+    }
+
     submit_orders(order_list, label) {
         if (!order_list.length) {
             frappe.msgprint(__('No {0} orders to submit.', [label]));
             return;
         }
-        frappe.confirm(
-            __('Submit {0} {1} order(s) and move to Order Confirmed?', [order_list.length, label]),
-            () => this.process_confirmations(order_list)
-        );
+
+        // Build a checklist so the user can unselect edge-case orders before submitting
+        const order_objs = this.orders.filter(o => order_list.includes(o.name));
+        const rows_html  = order_objs.map(o => `
+            <div style="display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid #f1f5f9;">
+                <input type="checkbox" class="oc-submit-chk" value="${o.name}" checked
+                       style="width:15px;height:15px;accent-color:#667eea;flex-shrink:0;cursor:pointer;">
+                <div style="flex:1;min-width:0;">
+                    <div style="font-weight:600;font-size:13px;">${o.name}</div>
+                    <div style="font-size:11px;color:#6b7280;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+                        ${frappe.utils.escape_html(o.customer_name || o.customer)}
+                    </div>
+                </div>
+                <div style="font-size:12px;color:#374151;white-space:nowrap;">${format_currency(o.grand_total, null, 0)}</div>
+            </div>`).join('');
+
+        const d = new frappe.ui.Dialog({
+            title: __('Submit {0} Order(s)', [label]),
+            fields: [{
+                fieldtype: 'HTML',
+                fieldname: 'order_list_html',
+                options: `
+                    <div style="margin-bottom:10px;display:flex;align-items:center;gap:8px;">
+                        <input type="checkbox" id="oc-select-all-submit" checked
+                               style="width:14px;height:14px;accent-color:#667eea;cursor:pointer;">
+                        <label for="oc-select-all-submit" style="font-size:12px;color:#6b7280;cursor:pointer;margin:0;">
+                            Select all / deselect all
+                        </label>
+                    </div>
+                    <div style="max-height:320px;overflow-y:auto;padding-right:4px;">${rows_html}</div>
+                    <div style="margin-top:10px;font-size:11px;color:#94a3b8;">
+                        Uncheck any orders you want to hold back — they stay "Called" and can be submitted later.
+                    </div>`,
+            }],
+            primary_action_label: __('Submit Selected'),
+            primary_action: () => {
+                const selected = [];
+                d.$wrapper.find('.oc-submit-chk:checked').each((_, el) => selected.push($(el).val()));
+                d.hide();
+                if (!selected.length) {
+                    frappe.msgprint(__('No orders selected — nothing was submitted.'));
+                    return;
+                }
+                this.process_confirmations(selected);
+            },
+        });
+        d.show();
+
+        // Wire up select-all toggle
+        d.$wrapper.find('#oc-select-all-submit').on('change', function () {
+            d.$wrapper.find('.oc-submit-chk').prop('checked', $(this).is(':checked'));
+        });
+        d.$wrapper.find('.oc-submit-chk').on('change', function () {
+            const total   = d.$wrapper.find('.oc-submit-chk').length;
+            const checked = d.$wrapper.find('.oc-submit-chk:checked').length;
+            d.$wrapper.find('#oc-select-all-submit').prop('checked', total === checked);
+        });
     }
 
     process_confirmations(order_list) {
