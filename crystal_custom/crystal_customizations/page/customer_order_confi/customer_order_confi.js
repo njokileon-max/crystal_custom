@@ -298,14 +298,15 @@ class OrderConfirmationManager {
                         <thead>
                             <tr>
                                 <th width="4%"></th>
-                                <th width="11%">Sales Order</th>
-                                <th width="13%">Customer</th>
-                                <th width="11%">Phone Number</th>
-                                <th width="9%">Amount</th>
-                                <th width="8%">Date</th>
-                                <th width="10%">Region</th>
-                                <th width="20%">Action</th>
-                                <th width="10%">Status</th>
+                                <th width="10%">Sales Order</th>
+                                <th width="12%">Customer</th>
+                                <th width="10%">Phone Number</th>
+                                <th width="8%">Amount</th>
+                                <th width="7%">Date</th>
+                                <th width="8%">Region</th>
+                                <th width="18%">Call Action</th>
+                                <th width="9%">Status</th>
+                                <th width="12%">Order Decision</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -329,7 +330,7 @@ class OrderConfirmationManager {
             const grp = groups[key];
             html += `
                 <tr class="oc-truck-header">
-                    <td colspan="9">
+                    <td colspan="10">
                         ${key === '__no_truck__' ? '📋' : '🚛'} ${frappe.utils.escape_html(truck_label)}
                         <span style="font-weight:normal;color:#94a3b8;margin-left:10px;">${grp.length} order${grp.length !== 1 ? 's' : ''}</span>
                     </td>
@@ -339,7 +340,7 @@ class OrderConfirmationManager {
                 const is_called     = this.called_orders.has(order.name);
                 const is_not_picked = this.not_picked_orders.has(order.name);
                 const is_declined   = this.declined_orders.has(order.name);
-                const is_actioned   = is_called || is_not_picked || is_declined;
+                const call_actioned = is_called || is_not_picked;   // only call actions lock each other
 
                 html += `
                 <tr class="order-row ${is_called ? 'order-called' : ''} ${is_not_picked ? 'order-not-picked' : ''} ${is_declined ? 'order-declined' : ''}"
@@ -365,17 +366,12 @@ class OrderConfirmationManager {
                     <td>
                         <div class="action-buttons">
                             <button class="btn btn-sm ${is_called ? 'btn-success' : 'btn-primary'} btn-mark-called"
-                                    data-order="${order.name}" ${is_actioned ? 'disabled' : ''}>
+                                    data-order="${order.name}" ${call_actioned ? 'disabled' : ''}>
                                 ${is_called ? '✓ Called' : 'Mark Called'}
                             </button>
                             <button class="btn btn-sm ${is_not_picked ? 'btn-danger' : 'btn-warning'} btn-not-picked"
-                                    data-order="${order.name}" ${is_actioned ? 'disabled' : ''}>
+                                    data-order="${order.name}" ${call_actioned ? 'disabled' : ''}>
                                 ${is_not_picked ? '✓ Not Picked' : 'Not Picked'}
-                            </button>
-                            <button class="btn btn-sm ${is_declined ? 'btn-default' : 'btn-default'} btn-declined"
-                                    data-order="${order.name}" ${is_actioned ? 'disabled' : ''}
-                                    style="${is_declined ? 'color:#6b7280;' : 'color:#6b7280;border-color:#d1d5db;'}">
-                                ${is_declined ? '✕ Declined' : 'Customer Declined'}
                             </button>
                         </div>
                     </td>
@@ -384,13 +380,21 @@ class OrderConfirmationManager {
                             '<span class="status-badge status-called">Ready to Submit</span>' :
                         is_not_picked ?
                             '<span class="status-badge status-not-picked">Call Not Picked</span>' :
-                        is_declined ?
-                            '<span class="status-badge status-declined">Customer Declined</span>' :
                             '<span class="status-badge status-pending">Pending Call</span>'}
+                    </td>
+                    <td style="text-align:center;">
+                        ${is_declined
+                            ? '<span class="status-badge status-declined" style="font-size:11px;">Order Declined</span>'
+                            : `<button class="btn btn-sm btn-default btn-declined"
+                                       data-order="${order.name}"
+                                       style="color:#dc2626;border-color:#fca5a5;white-space:nowrap;"
+                                       title="Customer has rejected this order — cancels it so it will not be delivered or invoiced">
+                                   ✕ Decline Order
+                               </button>`}
                     </td>
                 </tr>
                 <tr class="order-details-row" data-order="${order.name}" style="display:none;">
-                    <td colspan="9">
+                    <td colspan="10">
                         <div class="order-details-container" style="padding:15px;background:#f8f9fa;">
                             <div class="loading">Loading details...</div>
                         </div>
@@ -1291,16 +1295,12 @@ class OrderConfirmationManager {
             fieldtype: 'Small Text',
             description: 'This will be saved on the order as a call note',
         }], (vals) => {
-            // Optimistic UI: mark locally and disable buttons immediately
+            // Optimistic UI: mark locally and swap the decline button for a badge immediately
             this.declined_orders.add(order_name);
             const $row = $(`.order-row[data-order="${order_name}"]`);
-            $row.addClass('order-declined')
-                .find('.action-buttons .btn').prop('disabled', true);
-            $row.find('.status-badge')
-                .removeClass('status-pending status-called status-not-picked')
-                .addClass('status-declined')
-                .text('Customer Declined');
-            $btn.text('✕ Declined');
+            $row.addClass('order-declined');
+            // Replace the button in the last td with a declined badge
+            $btn.closest('td').html('<span class="status-badge status-declined" style="font-size:11px;">Order Declined</span>');
 
             const reason = vals.reason ? `Customer declined — ${vals.reason}` : 'Customer declined';
             frappe.call({
