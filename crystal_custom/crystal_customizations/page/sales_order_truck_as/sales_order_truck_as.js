@@ -15,16 +15,26 @@ class TruckAssignmentManager {
 		this.search_term = '';
 		this.selected_orders = new Set();
 		this.selected_trucks = new Set();
+		this._loaded_trucks = new Set();
 		this.saved_meta = {};
 		this.closed_trucks = [];
 		this.trucks_tab = 'active';
 		this._sps = new Set();
 		this._regions = new Set();
 		this.profitability_threshold = 33;
+		this._refresh_timer = null;
+		this._last_sync_time = null;
+		this._current_margin_orders = [];
+		this._current_margin_vehicle_type = null;
+		this._current_margin_truck_number = null;
+		this._item_wise_rows = [];
+		this._item_wise_currency = 'KES';
+		this._item_wise_sort = { key: null, dir: 'desc' };
 		this.setup_page();
 		this.load_trucks_from_orders();
 		this._fetch_fleet_settings();
 		this.vehicle_capacity_map = {};
+		this._start_auto_refresh();
 	}
 
 	// ── Toolbar ───────────────────────────────────────────────────────────────
@@ -75,7 +85,7 @@ class TruckAssignmentManager {
 			placeholder: 'Customer or order no…',
 			change: () => {
 				this.search_term = this.page.fields_dict.search_query.get_value() || '';
-				
+
 				this.render_view();
 			},
 		});
@@ -154,6 +164,11 @@ this.margin_panel = $(`
             <div class="nexus-margin-panel-title">Margin Preview</div></div>
             <button class="btn-close-margin-panel">&times;</button>
         </div>
+        <div class="nexus-margin-actions-row">
+            <button class="btn btn-sm btn-black-action btn-item-wise-analysis" disabled>
+                <i class="fa fa-table" style="margin-right:6px;"></i> Item-Wise Analysis
+            </button>
+        </div>
         <div id="nexus-margin-content" style="flex-grow:1;overflow-y:auto;padding:20px;">
             <div class="text-center text-muted py-5">Select a truck or orders and click "Analyse Margins".</div>
         </div>
@@ -163,6 +178,30 @@ this.margin_panel = $(`
 
 this.margin_panel.find('.btn-close-margin-panel, .nexus-margin-backdrop').on('click', () => {
     this.close_margin_panel();
+});
+
+this.margin_panel.find('.btn-item-wise-analysis').on('click', () => {
+    this.open_item_wise_modal();
+});
+
+this.item_wise_modal = $(`
+    <div class="nexus-itemwise-backdrop"></div>
+    <div class="nexus-itemwise-modal">
+        <div class="nexus-itemwise-header">
+            <div>
+                <div style="font-size:11px;text-transform:uppercase;color:#94a3b8;">Margin Analysis</div>
+                <div class="nexus-itemwise-title">Item-Wise Margin Breakdown</div>
+            </div>
+            <button class="btn-close-itemwise-modal">&times;</button>
+        </div>
+        <div id="nexus-itemwise-content" class="nexus-itemwise-content">
+            <div class="text-center text-muted py-5">Loading item-wise breakdown...</div>
+        </div>
+    </div>
+`).appendTo(this.page.wrapper);
+
+this.item_wise_modal.find('.btn-close-itemwise-modal, .nexus-itemwise-backdrop').on('click', () => {
+    this.close_item_wise_modal();
 });
 	}
 
@@ -260,6 +299,60 @@ this.margin_panel.find('.btn-close-margin-panel, .nexus-margin-backdrop').on('cl
 
 }
 
+	_start_auto_refresh() {
+		if (this._refresh_timer) clearInterval(this._refresh_timer);
+		this._refresh_timer = setInterval(() => {
+			const has_focus      = this.container && this.container.find('input:focus, textarea:focus').length > 0;
+			const has_selections = this.selected_orders.size > 0 || this.selected_trucks.size > 0;
+			if (!has_focus && !has_selections) {
+				this._silent_refresh();
+			}
+		}, 45000);
+	}
+
+	_silent_refresh() {
+		const from = this.page.fields_dict.from_date.get_value();
+		const to   = this.page.fields_dict.to_date.get_value();
+
+		let pending = 2;
+		const maybe_render = () => {
+			pending--;
+			if (pending === 0) {
+				this._last_sync_time = new Date();
+				this.render_view();
+			}
+		};
+
+		frappe.call({
+			method: 'crystal_custom.crystal_customizations.page.sales_order_truck_as.sales_order_truck_as.get_truck_assignment_orders',
+			args: {
+				from_date:          from || null,
+				to_date:            to   || null,
+				sales_persons_json: this._sps.size    ? JSON.stringify([...this._sps])     : null,
+				regions_json:       this._regions.size ? JSON.stringify([...this._regions]) : null,
+			},
+			callback: (r) => {
+				const result       = r.message || { assigned: [], unassigned: [] };
+				const truck_rows   = result.assigned   || [];
+				const unassigned_rows = result.unassigned || [];
+				const seen   = new Set(truck_rows.map(o => o.name));
+				const merged = [...truck_rows, ...unassigned_rows.filter(o => !seen.has(o.name))];
+				merged.forEach(o => { if (o.orphaned_from_truck) o.custom_truck_number = ''; });
+				this.orders = merged;
+				maybe_render();
+			},
+			error: () => maybe_render(),
+		});
+
+		frappe.call({
+			method: 'crystal_custom.crystal_customizations.page.item_order_fulfillme.item_order_fulfillme.get_ofm_closed_trucks',
+			callback: (r) => {
+				try { this._loaded_trucks = new Set(JSON.parse(r.message || '[]')); } catch(e) {}
+				maybe_render();
+			},
+			error: () => maybe_render(),
+		});
+	}
 
 open_margin_panel() {
     this.page.wrapper.find('.nexus-margin-panel').addClass('active');
@@ -365,6 +458,13 @@ close_margin_panel() {
 		const to   = this.page.fields_dict.to_date.get_value();
 
 		frappe.call({
+			method: 'crystal_custom.crystal_customizations.page.item_order_fulfillme.item_order_fulfillme.get_ofm_closed_trucks',
+			callback: (r) => {
+				try { this._loaded_trucks = new Set(JSON.parse(r.message || '[]')); } catch(e) {}
+			},
+		});
+
+		frappe.call({
 			method: 'crystal_custom.crystal_customizations.page.sales_order_truck_as.sales_order_truck_as.get_truck_assignment_orders',
 			args: {
 				from_date:           from || null,
@@ -403,6 +503,8 @@ close_margin_panel() {
 					}
 				});
 				if (seeded_new_trip_id) this._save_truck_meta();
+
+				this._last_sync_time = new Date();
 
 				// Fetch customer locations then render
 				const customers = [...new Set(this.orders.map(o => o.customer).filter(Boolean))];
@@ -456,6 +558,13 @@ close_margin_panel() {
 		const total_val  = orders.reduce((s, o) => s + (o.grand_total || 0), 0);
 		const trucks_used = new Set(assigned.map(o => o.custom_truck_number)).size;
 
+		const sync_label = this._last_sync_time
+			? (() => {
+				const secs = Math.round((Date.now() - this._last_sync_time) / 1000);
+				return secs < 5 ? 'just now' : secs < 60 ? `${secs}s ago` : `${Math.round(secs/60)}m ago`;
+			})()
+			: '';
+
 		let html = `
 		<div class="ta-kpi-row">
 			${this._kpi('Total Orders',   orders.length,                '#667eea')}
@@ -463,6 +572,10 @@ close_margin_panel() {
 			${this._kpi('Assigned',       assigned.length,              '#10b981')}
 			${this._kpi('Total Value',    format_currency(total_val),   '#f59e0b')}
 			${this._kpi('Trucks Active',  trucks_used,                  '#8b5cf6')}
+		</div>
+		<div class="ta-live-bar">
+			<span class="ta-live-dot"></span> Live &nbsp;·&nbsp; synced ${sync_label}
+			<span style="color:#94a3b8;font-size:11px;margin-left:6px;">(auto-refreshes every 45s)</span>
 		</div>
 
 		${(this.available_trucks.length || this.closed_trucks.length) ? `
@@ -782,35 +895,30 @@ close_margin_panel() {
 		);
 		if (!active_trucks.length) return '';
 
-		// Truck bulk action bar — always visible so "select all" is always accessible
-		const sel_t      = this.selected_trucks.size;
-		const all_t      = active_trucks.length;
-		const all_t_checked = sel_t === all_t && all_t > 0;
-
-		const sel_truck_objs = active_trucks.filter(t => this.selected_trucks.has(t.truck_number));
-		const sel_t_orders   = all_orders.filter(o => o.custom_truck_number && this.selected_trucks.has(o.custom_truck_number));
-		const sel_t_weight   = sel_truck_objs.reduce((s, t) => {
-			return s + all_orders.filter(o => o.custom_truck_number === t.truck_number).reduce((ws, o) => ws + (o.total_net_weight || 0), 0);
-		}, 0);
-		const sel_t_value = sel_t_orders.reduce((s, o) => s + (o.grand_total || 0), 0);
-
-		let html = `
-		<div class="ta-truck-bulk-bar">
-			<label class="ta-bulk-select-label" title="Select all trucks">
-				<input type="checkbox" class="ta-select-all-trucks-chk" ${all_t_checked ? 'checked' : ''}>
-				Select all
-			</label>
-			<span class="ta-bulk-sep"></span>
-			<span class="ta-truck-bulk-info">${sel_t} of ${all_t} truck${all_t !== 1 ? 's' : ''} selected
-				${sel_t ? `&nbsp;·&nbsp; &#8981; ${sel_t_weight.toFixed(0)} kg &nbsp;·&nbsp; ${format_currency(sel_t_value, null, 0)}` : ''}
-			</span>
-			${sel_t ? `
-			<div style="display:flex;gap:6px;margin-left:auto;">
-				<button class="btn btn-sm btn-primary ta-bulk-dispatch-trucks">Dispatch Selected</button>
-				<button class="btn btn-sm btn-danger  ta-bulk-remove-trucks">Remove Selected</button>
-				<button class="btn btn-sm btn-default ta-bulk-clear-trucks">Clear</button>
-			</div>` : ''}
-		</div>`;
+		// Truck bulk action bar
+		const sel_t = this.selected_trucks.size;
+		let html = '';
+		if (sel_t) {
+			const sel_truck_objs = active_trucks.filter(t => this.selected_trucks.has(t.truck_number));
+			const sel_t_orders   = all_orders.filter(o => o.custom_truck_number && this.selected_trucks.has(o.custom_truck_number));
+			const sel_t_weight   = sel_truck_objs.reduce((s, t) => {
+				return s + all_orders.filter(o => o.custom_truck_number === t.truck_number).reduce((ws, o) => ws + (o.total_net_weight || 0), 0);
+			}, 0);
+			const sel_t_value    = sel_t_orders.reduce((s, o) => s + (o.grand_total || 0), 0);
+			html += `
+			<div class="ta-truck-bulk-bar">
+				<span class="ta-truck-bulk-info">
+					<strong>${sel_t}</strong> truck${sel_t !== 1 ? 's' : ''} selected
+					&nbsp;·&nbsp; &#8981; ${sel_t_weight.toFixed(0)} kg
+					&nbsp;·&nbsp; ${format_currency(sel_t_value, null, 0)}
+				</span>
+				<div style="display:flex;gap:6px;">
+					<button class="btn btn-sm btn-primary ta-bulk-dispatch-trucks">Dispatch Selected</button>
+					<button class="btn btn-sm btn-danger  ta-bulk-remove-trucks">Remove Selected</button>
+					<button class="btn btn-sm btn-default ta-bulk-clear-trucks">Clear</button>
+				</div>
+			</div>`;
+		}
 
 		html += '<div class="ta-trucks-grid">';
 
@@ -825,11 +933,10 @@ close_margin_panel() {
 			const regions      = [...new Set(truck_orders.map(o => o.custom_delivery_region).filter(Boolean))].sort();
 			const is_checked   = this.selected_trucks.has(truck.truck_number);
 
-			// Warehouse status badge — falls back to "Pending Loading" when the
-			// backend hasn't supplied warehouse_status (older get_active_trucks
-			// responses), so the badge always renders something sensible.
-			const wh_status  = truck.warehouse_status || 'Pending';
-			const is_loaded  = wh_status === 'Loaded';
+			// Warehouse status badge — driven by OFM's Done/Reopen toggle
+			// (crystal_ofm_closed_trucks.json), fetched into this._loaded_trucks
+			// in load_data()/_silent_refresh().
+			const is_loaded  = this._loaded_trucks.has(truck.truck_number);
 			const status_badge = `<span class="ta-status-badge ${is_loaded ? 'loaded' : 'pending'}">${is_loaded ? 'Ready for Dispatch' : 'Pending Loading'}</span>`;
 
 			html += `
@@ -1100,17 +1207,6 @@ close_margin_panel() {
 		});
 
 		// ── Truck multi-select ────────────────────────────────────────────────────
-		// Select all trucks checkbox
-		this.container.find('.ta-select-all-trucks-chk').off('change').on('change', function () {
-			const checked = $(this).is(':checked');
-			const orders  = self.get_filtered_orders();
-			const active_trucks = self.available_trucks.filter(t =>
-				orders.some(o => o.custom_truck_number === t.truck_number)
-			);
-			active_trucks.forEach(t => checked ? self.selected_trucks.add(t.truck_number) : self.selected_trucks.delete(t.truck_number));
-			self.render_view();
-		});
-
 		this.container.find('.ta-truck-chk').off('change').on('change', function () {
 			const tn = $(this).data('truck');
 			if ($(this).is(':checked')) self.selected_trucks.add(tn);
@@ -1974,6 +2070,10 @@ ${driver_cols}
 				<p class="text-muted mt-3">Computing margin analysis...</p>
 			</div>
 		`);
+		this._current_margin_orders = orders || [];
+		this._current_margin_vehicle_type = vehicle_type || null;
+		this._current_margin_truck_number = truck_number || null;
+		this.margin_panel.find('.btn-item-wise-analysis').prop('disabled', !(orders && orders.length));
 		this._execute_margin_analysis(orders, vehicle_type, truck_number);
 	}
 
@@ -2144,6 +2244,131 @@ ${driver_cols}
 		$('#nexus-margin-content').html(html);
 	}
 
+	// ── Item-Wise Margin Analysis (popup modal) ──────────────────────────────
+
+	open_item_wise_modal() {
+		if (!this._current_margin_orders.length) {
+			frappe.msgprint(__('Run "Analyse Margins" first, then click "Item-Wise Analysis".'));
+			return;
+		}
+		this.page.wrapper.find('.nexus-itemwise-modal, .nexus-itemwise-backdrop').addClass('active');
+		$('#nexus-itemwise-content').html(`
+			<div class="text-center py-5">
+				<i class="fa fa-spinner fa-spin fa-2x text-primary"></i>
+				<p class="text-muted mt-3">Computing item-wise margin breakdown...</p>
+			</div>
+		`);
+		this._execute_item_wise_analysis(this._current_margin_orders);
+	}
+
+	close_item_wise_modal() {
+		this.page.wrapper.find('.nexus-itemwise-modal, .nexus-itemwise-backdrop').removeClass('active');
+	}
+
+	_execute_item_wise_analysis(orders) {
+		const sales_order_names = orders.map(o => o.name);
+		frappe.call({
+			method: 'nexus_supply_chain.routing.margin_analysis.get_item_wise_margin_breakdown',
+			args: { sales_orders: JSON.stringify(sales_order_names) },
+			callback: (r) => {
+				const data = r.message;
+				if (!data || data.status !== 'success') {
+					$('#nexus-itemwise-content').html(`<div class="alert alert-danger mt-2">Failed to compute item-wise margin breakdown.</div>`);
+					return;
+				}
+				this._item_wise_rows = data.rows || [];
+				this._item_wise_currency = data.currency || 'KES';
+				this._item_wise_sort = { key: null, dir: 'desc' };
+				this.render_item_wise_table();
+			},
+			error: () => {
+				$('#nexus-itemwise-content').html(`<div class="alert alert-danger mt-2">Server error computing item-wise margin breakdown.</div>`);
+			}
+		});
+	}
+
+	render_item_wise_table() {
+		const rows = [...this._item_wise_rows];
+		const { key, dir } = this._item_wise_sort;
+		if (key) {
+			rows.sort((a, b) => {
+				const av = a[key], bv = b[key];
+				if (typeof av === 'number' && typeof bv === 'number') {
+					return dir === 'asc' ? av - bv : bv - av;
+				}
+				const as = (av || '').toString().toLowerCase();
+				const bs = (bv || '').toString().toLowerCase();
+				if (as < bs) return dir === 'asc' ? -1 : 1;
+				if (as > bs) return dir === 'asc' ? 1 : -1;
+				return 0;
+			});
+		}
+
+		const currency = this._item_wise_currency || 'KES';
+		const fmt = (val) => `${currency} ${parseFloat(val || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+		const sort_icon = (col) => {
+			if (this._item_wise_sort.key !== col) return '<i class="fa fa-sort nexus-sort-icon"></i>';
+			return this._item_wise_sort.dir === 'asc'
+				? '<i class="fa fa-sort-up nexus-sort-icon active"></i>'
+				: '<i class="fa fa-sort-down nexus-sort-icon active"></i>';
+		};
+
+		const cols = [
+			{ key: 'item_code', label: 'Item Code' },
+			{ key: 'item_name', label: 'Item Name' },
+			{ key: 'rate', label: 'Rate (Incl. VAT)' },
+			{ key: 'rate_excl_vat', label: 'Rate (Excl. VAT)' },
+			{ key: 'total_cogs', label: 'Total Cogs' },
+			{ key: 'gross_margin', label: 'Gross Margin' },
+			{ key: 'gross_margin_percentage', label: 'Gross Margin %' },
+			{ key: 'default_bom', label: 'Default BOM' },
+			{ key: 'sales_order', label: 'Sales Order' },
+		];
+
+		const header_html = cols.map(c =>
+			`<th class="nexus-itemwise-sortable" data-sort-key="${c.key}">${c.label} ${sort_icon(c.key)}</th>`
+		).join('');
+
+		const body_html = rows.map(row => {
+			const bom_cell = row.default_bom
+				? `<a href="/app/bom/${row.default_bom}" target="_blank">${frappe.utils.escape_html(row.default_bom)}</a>`
+				: `<span style="color:#dc2626;font-weight:700;">None (0)</span>`;
+			return `<tr>
+				<td><a href="/app/item/${row.item_code}" target="_blank">${frappe.utils.escape_html(row.item_code)}</a></td>
+				<td>${frappe.utils.escape_html(row.item_name || '')}</td>
+				<td class="nexus-itemwise-amt">${fmt(row.rate)}</td>
+				<td class="nexus-itemwise-amt">${fmt(row.rate_excl_vat)}</td>
+				<td class="nexus-itemwise-amt" style="${!row.default_bom ? 'color:#dc2626;font-weight:700;' : ''}">${fmt(row.total_cogs)}</td>
+				<td class="nexus-itemwise-amt">${fmt(row.gross_margin)}</td>
+				<td class="nexus-itemwise-amt">${(row.gross_margin_percentage || 0).toFixed(2)}%</td>
+				<td>${bom_cell}</td>
+				<td><a href="/app/sales-order/${row.sales_order}" target="_blank">${frappe.utils.escape_html(row.sales_order)}</a></td>
+			</tr>`;
+		}).join('');
+
+		const html = `
+			<div class="nexus-itemwise-table-wrap">
+				<table class="nexus-itemwise-table">
+					<thead><tr>${header_html}</tr></thead>
+					<tbody>${body_html || `<tr><td colspan="9" class="text-center text-muted" style="padding:24px;">No line items found.</td></tr>`}</tbody>
+				</table>
+			</div>`;
+
+		$('#nexus-itemwise-content').html(html);
+
+		const self = this;
+		$('#nexus-itemwise-content').find('.nexus-itemwise-sortable').off('click').on('click', function () {
+			const sort_key = $(this).data('sort-key');
+			if (self._item_wise_sort.key === sort_key) {
+				self._item_wise_sort.dir = self._item_wise_sort.dir === 'asc' ? 'desc' : 'asc';
+			} else {
+				self._item_wise_sort = { key: sort_key, dir: 'desc' };
+			}
+			self.render_item_wise_table();
+		});
+	}
+
 	// ── SP Pills ──────────────────────────────────────────────────────────────
 
 	_render_sp_pills() {
@@ -2201,12 +2426,35 @@ ${driver_cols}
 			white-space: nowrap;
 		}
 
+		/* Live sync bar */
+		.ta-live-bar {
+			display: flex;
+			align-items: center;
+			gap: 4px;
+			font-size: 11px;
+			color: #64748b;
+			margin-bottom: 12px;
+			margin-top: -10px;
+		}
+		.ta-live-dot {
+			width: 7px;
+			height: 7px;
+			border-radius: 50%;
+			background: #10b981;
+			display: inline-block;
+			animation: ta-pulse 2s ease-in-out infinite;
+		}
+		@keyframes ta-pulse {
+			0%, 100% { opacity: 1; }
+			50%       { opacity: 0.35; }
+		}
+
 		/* KPI row */
 		.ta-kpi-row {
 			display: grid;
 			grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
 			gap: 16px;
-			margin-bottom: 24px;
+			margin-bottom: 8px;
 		}
 		.ta-kpi {
 			background: #fff;
@@ -2603,7 +2851,65 @@ ${driver_cols}
 		}
 		.ta-gps-mapped { background: #dcfce7; color: #166534; border: 1px solid #bbf7d0; }
 		.ta-gps-missing { background: #f1f5f9; color: #64748b; border: 1px solid #e2e8f0; }
+
+		/* Margin panel — Item-Wise Analysis button row */
+		.nexus-margin-actions-row {
+			padding: 14px 20px;
+			background: #f8fafc;
+			border-bottom: 1px solid #e2e8f0;
+			display: flex;
+			justify-content: flex-start;
+		}
+		.nexus-margin-actions-row .btn-item-wise-analysis {
+			padding: 8px 18px;
+			font-size: 13px;
+		}
+		.nexus-margin-actions-row .btn-item-wise-analysis:disabled {
+			opacity: .6;
+			cursor: not-allowed;
+		}
+
+		/* Item-Wise Analysis modal */
+		.nexus-itemwise-backdrop {
+			position: fixed; top:0; left:0; width:100vw; height:100vh;
+			background: rgba(15,23,42,.65); z-index:10001; display:none; backdrop-filter: blur(3px);
+		}
+		.nexus-itemwise-backdrop.active { display: block; }
+		.nexus-itemwise-modal {
+			position: fixed; top:5vh; left:50%; transform: translateX(-50%);
+			width: 90vw; max-width: 1200px; height: 90vh;
+			background: #fff; border-radius: 10px; box-shadow: 0 20px 60px rgba(0,0,0,.35);
+			z-index: 10002; display: none; flex-direction: column; overflow: hidden;
+		}
+		.nexus-itemwise-modal.active { display: flex; }
+		.nexus-itemwise-header {
+			display:flex; justify-content:space-between; align-items:flex-start;
+			padding: 16px 22px; background:#1e293b; color:#fff; border-bottom:1px solid #334155;
+		}
+		.nexus-itemwise-title { font-size:18px; font-weight:700; margin-top:4px; color:#fff; }
+		.btn-close-itemwise-modal {
+			background:transparent; border:none; color:#94a3b8; font-size:28px; line-height:1; padding:0; cursor:pointer;
+		}
+		.btn-close-itemwise-modal:hover { color:#fff; }
+		.nexus-itemwise-content { flex-grow:1; overflow:hidden; padding: 18px 22px; display:flex; }
+		.nexus-itemwise-table-wrap { overflow:auto; width:100%; max-height:100%; }
+		.nexus-itemwise-table {
+			width: 100%; border-collapse: collapse; font-size: 13px;
+		}
+		.nexus-itemwise-table thead th {
+			background: #1e293b; color:#fff; font-size:11px; font-weight:700;
+			text-transform: uppercase; letter-spacing:.4px; padding: 10px 12px;
+			border: none; white-space: nowrap; position: sticky; top: 0; z-index: 1;
+		}
+		.nexus-itemwise-sortable { cursor: pointer; user-select: none; }
+		.nexus-itemwise-sortable:hover { background: #334155; }
+		.nexus-sort-icon { margin-left:5px; font-size:11px; color:#64748b; }
+		.nexus-sort-icon.active { color:#fbbf24; }
+		.nexus-itemwise-table td {
+			padding: 9px 12px; border-bottom: 1px solid #f1f5f9; vertical-align: middle;
+		}
+		.nexus-itemwise-table tbody tr:hover td { background: #f8fafc; }
+		.nexus-itemwise-amt { text-align: right; font-family: monospace; }
 		</style>`;
 	}
 }
-

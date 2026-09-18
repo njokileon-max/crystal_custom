@@ -1312,32 +1312,6 @@ ${truck_blocks}
 			self.container.find('#tf-trucks-pane').html(self._render_trucks_tab());
 			self._attach_events();
 			frappe.show_alert({ message: __('Truck {0} marked as complete', [tn]), indicator: 'green' });
-
-			// Persist as a submitted Crystal Truck Plan for permanent record
-			const truck_meta = (self.truck_data.trucks || []).find(t => t.truck_number === tn) || {};
-			const cv_truck   = ((self.customer_data || {}).trucks || []).find(t => t.truck_number === tn) || {};
-			const orders_map = {};
-			(cv_truck.orders || []).forEach(o => { orders_map[o.name] = o; });
-			const order_list = (truck_meta.orders || []).map(o => {
-				const cv = orders_map[o.name] || {};
-				return {
-					name:             o.name,
-					customer_name:    o.customer_name || '',
-					delivery_region:  o.delivery_region || '',
-					grand_total:      cv.grand_total      || 0,
-					total_net_weight: cv.total_net_weight || 0,
-				};
-			});
-			frappe.call({
-				method: 'crystal_custom.crystal_customizations.page.sales_order_truck_as.sales_order_truck_as.create_truck_plan',
-				args: {
-					truck_number: tn,
-					driver_name:  '',
-					capacity_kg:  0,
-					orders_json:  JSON.stringify(order_list),
-					closed_from:  'Order Fulfillment',
-				},
-			});
 		});
 		this.container.off('click.tf-reopen').on('click.tf-reopen', '.tf-truck-reopen-btn', function () {
 			const tn = $(this).data('truck');
@@ -2086,3 +2060,6 @@ ${truck_blocks}
 		</style>`;
 	}
 }
+
+
+

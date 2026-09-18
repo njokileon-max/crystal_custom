@@ -620,3 +620,5 @@ def get_default_warehouse_for_manufacture(item_code):
     if warehouse:
         return warehouse
     return frappe.db.get_value('Warehouse', {'is_group': 0, 'disabled': 0}, 'name')
+
+
