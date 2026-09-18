@@ -1,3 +1,10 @@
+# [1.36.0](https://github.com/wanguimbutu/crystal_custom/compare/v1.35.2...v1.36.0) (2026-09-18)
+
+
+### Features
+
+* changes to much the sales app ([4d7cff3](https://github.com/wanguimbutu/crystal_custom/commit/4d7cff3217adc66e2fb380241baae7ec2050a6a3))
+
 ## [1.35.2](https://github.com/wanguimbutu/crystal_custom/compare/v1.35.1...v1.35.2) (2026-08-20)
 
 
