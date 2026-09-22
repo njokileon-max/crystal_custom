@@ -1,3 +1,10 @@
+## [1.36.2](https://github.com/wanguimbutu/crystal_custom/compare/v1.36.1...v1.36.2) (2026-09-22)
+
+
+### Bug Fixes
+
+* format item issue ledger ([f2d5909](https://github.com/wanguimbutu/crystal_custom/commit/f2d59095443c446bc14fad395b9344a9b3e10b95))
+
 ## [1.36.1](https://github.com/wanguimbutu/crystal_custom/compare/v1.36.0...v1.36.1) (2026-09-22)
 
 
