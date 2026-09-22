@@ -1,3 +1,10 @@
+## [1.36.1](https://github.com/wanguimbutu/crystal_custom/compare/v1.36.0...v1.36.1) (2026-09-22)
+
+
+### Bug Fixes
+
+* add auto-close option in truck plan ([3c40988](https://github.com/wanguimbutu/crystal_custom/commit/3c40988f0809a0b44674efb9b32fc1a333ea8b6e))
+
 # [1.36.0](https://github.com/wanguimbutu/crystal_custom/compare/v1.35.2...v1.36.0) (2026-09-18)
 
 
