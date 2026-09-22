@@ -66,7 +66,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Closed From",
-   "options": "\nTruck Assignment\nOrder Fulfillment"
+   "options": "\nTruck Assignment\nOrder Fulfillment\nAuto-Close"
   },
   {
    "fieldname": "driver_name",
@@ -255,7 +255,7 @@
  "index_web_pages_for_search": 1,
  "is_submittable": 1,
  "links": [],
- "modified": "2026-08-02 00:00:00.000000",
+ "modified": "2026-09-22 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Crystal Customizations",
  "name": "Crystal Truck Plan",
