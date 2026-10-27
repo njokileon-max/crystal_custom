@@ -1,3 +1,10 @@
+# [1.37.0](https://github.com/wanguimbutu/crystal_custom/compare/v1.36.2...v1.37.0) (2026-10-27)
+
+
+### Features
+
+* supplier payment advise ([14a5113](https://github.com/wanguimbutu/crystal_custom/commit/14a51130f2fddaea4ff67da74e9cf78ed91cf9b8))
+
 ## [1.36.2](https://github.com/wanguimbutu/crystal_custom/compare/v1.36.1...v1.36.2) (2026-09-22)
 
 
