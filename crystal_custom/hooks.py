@@ -64,6 +64,11 @@ doc_events = {
     "Delivery Note": {
         "on_submit": "crystal_custom.crystal_customizations.events.delivery_note.on_submit",
         "on_cancel": "crystal_custom.crystal_customizations.events.delivery_note.on_cancel"
+    },
+    "Payment Entry": {
+        "on_submit": "crystal_custom.crystal_customizations.events.payment_entry.on_submit",
+        "on_cancel": "crystal_custom.crystal_customizations.events.payment_entry.on_cancel",
+        "on_trash": "crystal_custom.crystal_customizations.events.payment_entry.on_trash"
     }
 }
 
@@ -107,6 +112,7 @@ doc_events = {
 # include js in doctype views
 # doctype_js = {"doctype" : "public/js/doctype.js"}
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
+doctype_list_js = {"Purchase Invoice": "public/js/purchase_invoice_list.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}
 
@@ -146,6 +152,7 @@ doc_events = {
 
 # before_install = "crystal_custom.install.before_install"
 # after_install = "crystal_custom.install.after_install"
+after_install = "crystal_custom.setup.after_install"
 
 # Uninstallation
 # ------------
