@@ -287,10 +287,10 @@ close_margin_panel() {
 				const seen   = new Set(truck_rows.map(o => o.name));
 				const merged = [...truck_rows, ...unassigned_rows.filter(o => !seen.has(o.name))];
 
-				// Orphaned (dispatched-away) and dismantled orders still carry their old
+				// Dismantled orders still carry their old
 				// truck number. Clear it so they appear in the awaiting list instead of
 				// creating a ghost truck panel.
-				merged.forEach(o => { if (o.orphaned_from_truck || o.dismantled_from_truck) o.custom_truck_number = ''; });
+				merged.forEach(o => { if (o.dismantled_from_truck) o.custom_truck_number = ''; });
 
 				this.orders = merged;
 
@@ -352,8 +352,7 @@ close_margin_panel() {
 			(o.customer                || '').toLowerCase().includes(q) ||
 			(o.sales_persons           || '').toLowerCase().includes(q) ||
 			(o.custom_delivery_region  || '').toLowerCase().includes(q) ||
-			(o.dismantled_from_truck   || '').toLowerCase().includes(q) ||
-			(o.orphaned_from_truck     || '').toLowerCase().includes(q)
+			(o.dismantled_from_truck   || '').toLowerCase().includes(q)
 		);
 	}
 
@@ -545,16 +544,15 @@ close_margin_panel() {
 				</td>
 			</tr>`;
 
-			// Sort: dismantled (just yanked off a truck) → overdue → orphan (needs
-			// reassign) → submitted-needs-truck → normal. Dismantled orders rank
+			// Sort: dismantled (just yanked off a truck) → overdue →
+			// submitted-needs-truck → normal. Dismantled orders rank
 			// highest so they surface at the top of the table, not buried.
 			const _today = frappe.datetime.get_today();
 			grp.sort((a, b) => {
 				const _dismantled = o => !!(o.dismantled_from_truck);
 				const _overdue   = o => o.delivery_date && o.delivery_date < _today && !parseFloat(o.per_delivered) && !parseFloat(o.per_billed);
-				const _orphan    = o => !!(o.orphaned_from_truck);
 				const _submitted = o => parseInt(o.docstatus) === 1;
-				const rank = o => _dismantled(o) ? 0 : _overdue(o) ? 1 : _orphan(o) ? 2 : _submitted(o) ? 3 : 4;
+				const rank = o => _dismantled(o) ? 0 : _overdue(o) ? 1 : _submitted(o) ? 2 : 3;
 				return rank(a) - rank(b);
 			});
 
@@ -563,7 +561,6 @@ close_margin_panel() {
 				const checked       = this.selected_orders.has(o.name);
 				const is_pf         = o.custom_is_pre_fulfillment == 1;
 				const is_submitted  = parseInt(o.docstatus) === 1;
-				const is_orphan     = !!(o.orphaned_from_truck);   // had a truck, truck closed, not delivered
 				const is_dismantled = !!(o.dismantled_from_truck); // truck was removed before dispatch
 				const today         = frappe.datetime.get_today();
 				const is_overdue    = o.delivery_date && o.delivery_date < today
@@ -578,8 +575,7 @@ close_margin_panel() {
 						<a href="/app/sales-order/${o.name}" target="_blank">${o.name}</a>
 						${not_picked ? '<span class="ta-warn-badge" title="Call not picked">!</span>' : ''}
 						${is_dismantled ? `<div class="ta-dismantled-badge" title="This truck was removed before dispatch — the order was returned here.">&#9888; Dismantled from ${frappe.utils.escape_html(o.dismantled_from_truck)}</div>` : ''}
-						${is_orphan ? `<div style="font-size:10px;color:#b45309;margin-top:1px;">Prev truck: ${frappe.utils.escape_html(o.orphaned_from_truck)}</div>` : ''}
-						${is_submitted && o.delivery_date && !is_overdue && !is_orphan && !is_dismantled ? `<div style="font-size:10px;color:#7c3aed;margin-top:1px;">Due: ${frappe.datetime.str_to_user(o.delivery_date)}</div>` : ''}
+						${is_submitted && o.delivery_date && !is_overdue && !is_dismantled ? `<div style="font-size:10px;color:#7c3aed;margin-top:1px;">Due: ${frappe.datetime.str_to_user(o.delivery_date)}</div>` : ''}
 					</td>
 					<td title="${frappe.utils.escape_html(o.customer)}">
 						<div style="display:flex; justify-content:space-between; align-items:center;">
@@ -1470,6 +1466,7 @@ close_margin_panel() {
 
 		// Run both operations in parallel: mark orders closed on SOs + submit/restart CTP
 		let orders_done = false, plan_done = false, new_plan_name = '';
+		let orders_failed = false, plan_failed = false;
 
 		const finish = () => {
 			if (!orders_done || !plan_done) return;
@@ -1480,7 +1477,13 @@ close_margin_panel() {
 				args: { truck_number, trip_id: new_trip_id, plan_name: new_plan_name },
 			});
 
-			frappe.show_alert({ message: __('Trip dispatched for {0} — ready for next load', [truck_number]), indicator: 'green' });
+			if (orders_failed) {
+				frappe.show_alert({ message: __('Truck {0} was not dispatched — its orders could not be updated. Please try again.', [truck_number]), indicator: 'red' });
+			} else if (plan_failed) {
+				frappe.show_alert({ message: __('Truck {0} dispatched, but its Trip Plan could not be recorded.', [truck_number]), indicator: 'orange' });
+			} else {
+				frappe.show_alert({ message: __('Trip dispatched for {0} — ready for next load', [truck_number]), indicator: 'green' });
+			}
 
 			// Refetch both the truck list and trip history — load_data() alone
 			// never touches either, so without this a freshly dispatched trip
@@ -1488,12 +1491,20 @@ close_margin_panel() {
 			this.load_trucks(() => this.load_data());
 		};
 
-		// 1. Batch-set custom_truck_closed=1 on all Sales Orders
+		// 1. Take the orders off this page. Other pages keep showing them (custom_truck_closed stays 0).
 		frappe.call({
-			method: 'crystal_custom.crystal_customizations.page.sales_order_truck_as_v2.sales_order_truck_as_v2.close_truck_orders',
+			method: 'crystal_custom.crystal_customizations.page.sales_order_truck_as_v2.sales_order_truck_as_v2.mark_orders_dispatched',
 			args:   { order_names_json: JSON.stringify(truck_orders.map(o => o.name)) },
-			callback: () => { orders_done = true; finish(); },
-			error:    () => { orders_done = true; finish(); },
+			callback: () => {
+				// Take the truck off the page now: the plan call below can take a while
+				// because it waits on route and margin calculations.
+				const closed = new Set(truck_orders.map(o => o.name));
+				this.orders = this.orders.filter(o => !closed.has(o.name));
+				this.render_view();
+				orders_done = true;
+				finish();
+			},
+			error:    () => { orders_failed = true; orders_done = true; finish(); },
 		});
 
 		// 2. Submit the active Crystal Truck Plan + create a new Draft for the next trip
@@ -1508,7 +1519,7 @@ close_margin_panel() {
 				new_trip_id:  new_trip_id,
 			},
 			callback: (r) => { new_plan_name = (r.message || {}).new_plan || ''; plan_done = true; finish(); },
-			error:    () => { plan_done = true; finish(); },
+			error:    () => { plan_failed = true; plan_done = true; finish(); },
 		});
 	}
 
@@ -1529,7 +1540,10 @@ close_margin_panel() {
 						fields: ['name'],
 						filters: [
 							['Sales Order', 'custom_truck_number', '=', ct.truck_number],
+						],
+						or_filters: [
 							['Sales Order', 'custom_truck_closed', '=', 1],
+							['Sales Order', 'custom_truck_dispatched', '=', 1],
 						],
 						limit_page_length: 500,
 					},

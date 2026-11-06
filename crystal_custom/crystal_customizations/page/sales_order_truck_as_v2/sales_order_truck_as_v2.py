@@ -85,22 +85,19 @@ def get_truck_assignment_orders(from_date=None, to_date=None, sales_persons_json
           AND so.custom_truck_number IS NOT NULL
           AND so.custom_truck_number != ''
           AND IFNULL(so.custom_truck_closed, 0) != 1
+          AND IFNULL(so.custom_truck_dispatched, 0) != 1
           AND IFNULL(so.custom_truck_dismantled, 0) != 1
         ORDER BY so.transaction_date DESC
         LIMIT 500
     """, params, as_dict=1)
 
-    # Unassigned orders: submitted orders always show (truck may have been dispatched
-    # or dismantled). Also surfaces "limbo" orders — custom_truck_closed=1 but not yet
-    # delivered, or custom_truck_dismantled=1 — which fall through both the assigned
-    # and unassigned filters otherwise.
+    # Unassigned orders: no truck yet, or returned because their truck was dismantled.
+    # Dispatched orders do not come back here.
     # Date filter only applies to draft orders so old confirmed orders are never hidden.
     unassigned = frappe.db.sql(f"""
         SELECT DISTINCT
             {select_cols},
             so.status AS so_status,
-            CASE WHEN IFNULL(so.custom_truck_closed, 0) = 1
-                 THEN so.custom_truck_number ELSE '' END AS orphaned_from_truck,
             CASE WHEN IFNULL(so.custom_truck_dismantled, 0) = 1
                  THEN so.custom_truck_number ELSE '' END AS dismantled_from_truck
         FROM `tabSales Order` so {sp_join}
@@ -114,8 +111,6 @@ def get_truck_assignment_orders(from_date=None, to_date=None, sales_persons_json
           AND (1=1 {date_where})
           AND (
               (so.custom_truck_number IS NULL OR so.custom_truck_number = '')
-              OR (IFNULL(so.custom_truck_closed, 0) = 1
-                  AND IFNULL(so.per_delivered, 0) < 100)
               OR (IFNULL(so.custom_truck_dismantled, 0) = 1)
           )
         ORDER BY so.docstatus DESC, so.transaction_date DESC
@@ -129,7 +124,7 @@ def debug_order_visibility(order_name):
     """Temporary debug: return raw field values + which query conditions fail for an order."""
     row = frappe.db.sql("""
         SELECT name, docstatus, status, workflow_state,
-               custom_truck_number, custom_truck_closed,
+               custom_truck_number, custom_truck_closed, custom_truck_dispatched,
                IFNULL(per_delivered, 0) AS per_delivered,
                IFNULL(per_billed, 0)    AS per_billed,
                transaction_date, delivery_date,
@@ -142,13 +137,11 @@ def debug_order_visibility(order_name):
     o = row[0]
     tn = (o.custom_truck_number or '').strip()
     tc = int(o.custom_truck_closed or 0)
-    pd = float(o.per_delivered or 0)
+    dp = int(o.custom_truck_dispatched or 0)
     return {
         'raw': dict(o),
-        'in_assigned_candidate': bool(tn and tc != 1),
-        'in_unassigned_candidate': bool(
-            (not tn) or (tc == 1 and pd < 100)
-        ),
+        'in_assigned_candidate': bool(tn and tc != 1 and dp != 1),
+        'in_unassigned_candidate': not tn,
         'status_excluded': o.status in ('Completed', 'Closed'),
         'docstatus_excluded': o.docstatus not in (0, 1),
         'wf_excluded': (o.docstatus == 0 and (o.workflow_state or '') == 'Cancelled'),
@@ -262,6 +255,7 @@ def set_truck_number(order_name, truck_number):
         'custom_truck_number': truck_number or '',
         'custom_truck_closed': 0,
         'custom_truck_dismantled': 0,
+        'custom_truck_dispatched': 0,
     })
     return True
 
@@ -356,7 +350,27 @@ def _compute_route_and_margin_for_dispatch(plan):
 
 @frappe.whitelist()
 def set_truck_closed(order_name, value=1):
-    frappe.db.set_value('Sales Order', order_name, 'custom_truck_closed', int(value))
+    values = {'custom_truck_closed': int(value)}
+    if not int(value):
+        # Reopening a trip puts its orders back on the Truck Assignment page.
+        values['custom_truck_dispatched'] = 0
+    frappe.db.set_value('Sales Order', order_name, values)
+    return True
+
+@frappe.whitelist()
+def mark_orders_dispatched(order_names_json):
+    """Take dispatched orders off the Truck Assignment page only. This does not set
+    custom_truck_closed, because other pages use that flag to hide orders."""
+    import json
+    names = json.loads(order_names_json) if isinstance(order_names_json, str) else order_names_json
+    if not names:
+        return True
+    ph = ', '.join(['%s'] * len(names))
+    frappe.db.sql(
+        f"UPDATE `tabSales Order` SET custom_truck_dispatched = 1 WHERE name IN ({ph})",
+        names
+    )
+    frappe.db.commit()
     return True
 
 @frappe.whitelist()
@@ -473,6 +487,7 @@ def upsert_truck(truck_number, driver_name='', vehicle_type=None, trip_id=None, 
                 'custom_truck_number': truck_number,
                 'custom_truck_closed': ['!=', 1],
                 'custom_truck_dismantled': ['!=', 1],
+                'custom_truck_dispatched': ['!=', 1],
             },
             fields=['name', 'customer_name', 'custom_delivery_region', 'grand_total', 'total_net_weight'],
         )
@@ -589,6 +604,7 @@ def dismantle_truck(truck_number):
             'custom_truck_number': truck_number,
             'custom_truck_closed': ['!=', 1],
             'custom_truck_dismantled': ['!=', 1],
+            'custom_truck_dispatched': ['!=', 1],
         },
         pluck='name',
     )
@@ -869,6 +885,7 @@ def check_and_auto_close_trucks():
           AND custom_truck_number != ''
           AND IFNULL(custom_truck_closed, 0) != 1
           AND IFNULL(custom_truck_dismantled, 0) != 1
+          AND IFNULL(custom_truck_dispatched, 0) != 1
     """, as_dict=1)
 
     if not rows:

@@ -16,6 +16,7 @@ class TruckAssignmentManager {
 		this.selected_orders = new Set();
 		this.selected_trucks = new Set();
 		this._loaded_trucks = new Set();
+		this._dispatched_trucks = new Set();
 		this.saved_meta = {};
 		this.closed_trucks = [];
 		this.trucks_tab = 'active';
@@ -227,6 +228,7 @@ this.item_wise_modal.find('.btn-close-itemwise-modal, .nexus-itemwise-backdrop')
 						filters: [
 							['Sales Order', 'custom_truck_number', '=', plate],
 							['Sales Order', 'custom_truck_closed', '!=', 1],
+							['Sales Order', 'custom_truck_dispatched', '!=', 1],
 						],
 						limit_page_length: 0,
 					},
@@ -325,6 +327,7 @@ close_margin_panel() {
 							['Sales Order', 'docstatus', 'in', [0, 1]],
 							['Sales Order', 'custom_truck_number', '!=', ''],
 							['Sales Order', 'custom_truck_closed', '!=', 1],
+							['Sales Order', 'custom_truck_dispatched', '!=', 1],
 						],
 						limit_page_length: 500,
 					},
@@ -393,6 +396,7 @@ close_margin_panel() {
 	}
 
 	load_data() {
+		this._dispatched_trucks.clear();
 		this.selected_orders.clear();
 		this.selected_trucks.clear();
 		this.container.html(this._loading_html());
@@ -422,10 +426,6 @@ close_margin_panel() {
 				// Merge: truck-assigned always win; add unassigned not already present
 				const seen   = new Set(truck_rows.map(o => o.name));
 				const merged = [...truck_rows, ...unassigned_rows.filter(o => !seen.has(o.name))];
-
-				// Orphaned orders (from a closed truck) still carry their old truck number.
-				// Clear it so they appear in the awaiting list rather than creating a ghost truck panel.
-				merged.forEach(o => { if (o.orphaned_from_truck) o.custom_truck_number = ''; });
 
 				this.orders = merged;
 
@@ -545,6 +545,8 @@ close_margin_panel() {
 		// Only persist trucks with current orders — prevents the metadata blob from
 		// growing unboundedly as old trips accumulate across sessions.
 		const active_nums = new Set(this.orders.map(o => o.custom_truck_number).filter(Boolean));
+		// A truck dispatched just now has no orders left here but still needs its new trip saved.
+		this._dispatched_trucks.forEach(tn => active_nums.add(tn));
 		const data = this.available_trucks
 			.filter(t => active_nums.has(t.truck_number))
 			.map(t => ({
@@ -690,13 +692,12 @@ close_margin_panel() {
 				</td>
 			</tr>`;
 
-			// Sort: overdue → orphan (needs reassign) → submitted-needs-truck → normal
+			// Sort: overdue → submitted-needs-truck → normal
 			const _today = frappe.datetime.get_today();
 			grp.sort((a, b) => {
 				const _overdue   = o => o.delivery_date && o.delivery_date < _today && !parseFloat(o.per_delivered) && !parseFloat(o.per_billed);
-				const _orphan    = o => !!(o.orphaned_from_truck);
 				const _submitted = o => parseInt(o.docstatus) === 1;
-				const rank = o => _overdue(o) ? 0 : _orphan(o) ? 1 : _submitted(o) ? 2 : 3;
+				const rank = o => _overdue(o) ? 0 : _submitted(o) ? 1 : 2;
 				return rank(a) - rank(b);
 			});
 
@@ -705,7 +706,6 @@ close_margin_panel() {
 				const checked       = this.selected_orders.has(o.name);
 				const is_pf         = o.custom_is_pre_fulfillment == 1;
 				const is_submitted  = parseInt(o.docstatus) === 1;
-				const is_orphan     = !!(o.orphaned_from_truck);   // had a truck, truck closed, not delivered
 				const today         = frappe.datetime.get_today();
 				const is_overdue    = o.delivery_date && o.delivery_date < today
 					&& !parseFloat(o.per_delivered || 0)
@@ -718,8 +718,7 @@ close_margin_panel() {
 					<td>
 						<a href="/app/sales-order/${o.name}" target="_blank">${o.name}</a>
 						${not_picked ? '<span class="ta-warn-badge" title="Call not picked">!</span>' : ''}
-						${is_orphan ? `<div style="font-size:10px;color:#b45309;margin-top:1px;">Prev truck: ${frappe.utils.escape_html(o.orphaned_from_truck)}</div>` : ''}
-						${is_submitted && o.delivery_date && !is_overdue && !is_orphan ? `<div style="font-size:10px;color:#7c3aed;margin-top:1px;">Due: ${frappe.datetime.str_to_user(o.delivery_date)}</div>` : ''}
+						${is_submitted && o.delivery_date && !is_overdue ? `<div style="font-size:10px;color:#7c3aed;margin-top:1px;">Due: ${frappe.datetime.str_to_user(o.delivery_date)}</div>` : ''}
 					</td>
 					<td title="${frappe.utils.escape_html(o.customer)}">
 						<div style="display:flex; justify-content:space-between; align-items:center;">
@@ -1624,6 +1623,7 @@ close_margin_panel() {
 
 		// Run both operations in parallel: mark orders closed on SOs + submit/restart CTP
 		let orders_done = false, plan_done = false, new_plan_name = '';
+		let orders_failed = false, plan_failed = false;
 
 		const finish = () => {
 			if (!orders_done || !plan_done) return;
@@ -1636,7 +1636,13 @@ close_margin_panel() {
 			}
 			this._save_truck_meta();
 
-			frappe.show_alert({ message: __('Trip dispatched for {0} — ready for next load', [truck_number]), indicator: 'green' });
+			if (orders_failed) {
+				frappe.show_alert({ message: __('Truck {0} was not dispatched — its orders could not be updated. Please try again.', [truck_number]), indicator: 'red' });
+			} else if (plan_failed) {
+				frappe.show_alert({ message: __('Truck {0} dispatched, but its Trip Plan could not be recorded.', [truck_number]), indicator: 'orange' });
+			} else {
+				frappe.show_alert({ message: __('Trip dispatched for {0} — ready for next load', [truck_number]), indicator: 'green' });
+			}
 
 			if (on_done) {
 				// Caller manages the final reload (e.g., bulk dispatch chains multiple trucks)
@@ -1654,12 +1660,21 @@ close_margin_panel() {
 			}
 		};
 
-		// 1. Batch-set custom_truck_closed=1 on all Sales Orders
+		// 1. Take the orders off this page. Other pages keep showing them (custom_truck_closed stays 0).
 		frappe.call({
-			method: 'crystal_custom.crystal_customizations.page.sales_order_truck_as.sales_order_truck_as.close_truck_orders',
+			method: 'crystal_custom.crystal_customizations.page.sales_order_truck_as.sales_order_truck_as.mark_orders_dispatched',
 			args:   { order_names_json: JSON.stringify(truck_orders.map(o => o.name)) },
-			callback: () => { orders_done = true; finish(); },
-			error:    () => { orders_done = true; finish(); },
+			callback: () => {
+				// Take the truck off the page now: the plan call below can take a while
+				// because it waits on route and margin calculations.
+				const closed = new Set(truck_orders.map(o => o.name));
+				this.orders = this.orders.filter(o => !closed.has(o.name));
+				this._dispatched_trucks.add(truck_number);
+				this.render_view();
+				orders_done = true;
+				finish();
+			},
+			error:    () => { orders_failed = true; orders_done = true; finish(); },
 		});
 
 		// 2. Submit the active Crystal Truck Plan + create a new Draft for the next trip
@@ -1674,7 +1689,7 @@ close_margin_panel() {
 				new_trip_id:  new_trip_id,
 			},
 			callback: (r) => { new_plan_name = (r.message || {}).new_plan || ''; plan_done = true; finish(); },
-			error:    () => { plan_done = true; finish(); },
+			error:    () => { plan_failed = true; plan_done = true; finish(); },
 		});
 	}
 
@@ -1695,7 +1710,10 @@ close_margin_panel() {
 						fields: ['name'],
 						filters: [
 							['Sales Order', 'custom_truck_number', '=', ct.truck_number],
+						],
+						or_filters: [
 							['Sales Order', 'custom_truck_closed', '=', 1],
+							['Sales Order', 'custom_truck_dispatched', '=', 1],
 						],
 						limit_page_length: 500,
 					},

@@ -167,6 +167,21 @@
   {
     "doctype": "Custom Field",
     "dt": "Sales Order",
+    "name": "Sales Order-custom_truck_dispatched",
+    "fieldname": "custom_truck_dispatched",
+    "label": "Truck Dispatched",
+    "fieldtype": "Check",
+    "insert_after": "custom_truck_closed",
+    "default": 0,
+    "read_only": 1,
+    "no_copy": 1,
+    "description": "Set when the truck is dispatched from Truck Assignment. It only hides the order from that page. Other pages keep showing it.",
+    "allow_on_submit": 1,
+    "permlevel": 0
+  },
+  {
+    "doctype": "Custom Field",
+    "dt": "Sales Order",
     "name": "Sales Order-custom_is_pre_fulfillment",
     "fieldname": "custom_is_pre_fulfillment",
     "label": "Pre-Fulfilment Order",
