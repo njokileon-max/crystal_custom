@@ -1,10 +1,10 @@
 // Copyright (c) 2026, Crystal Adhesives Ltd
 // For license information, please see license.txt
 
-const SPP_METHOD =
-	"crystal_custom.crystal_customizations.doctype.supplier_payment_proposal.supplier_payment_proposal";
+const SPA_METHOD =
+	"crystal_custom.crystal_customizations.doctype.supplier_payment_advice.supplier_payment_advice";
 
-frappe.ui.form.on("Supplier Payment Proposal", {
+frappe.ui.form.on("Supplier Payment Advice", {
 	setup(frm) {
 		frm.set_query("paid_from", () => ({
 			filters: {
@@ -50,7 +50,7 @@ frappe.ui.form.on("Supplier Payment Proposal", {
 		if (frm.doc.docstatus === 1 && pending.length < (frm.doc.invoices || []).length) {
 			frm.add_custom_button(__("View Payment Entries"), () => {
 				frappe.set_route("List", "Payment Entry", {
-					custom_supplier_payment_proposal: frm.doc.name,
+					custom_supplier_payment_advice: frm.doc.name,
 				});
 			});
 		}
@@ -64,13 +64,13 @@ frappe.ui.form.on("Supplier Payment Proposal", {
 	},
 });
 
-frappe.ui.form.on("Supplier Payment Proposal Invoice", {
+frappe.ui.form.on("Supplier Payment Advice Invoice", {
 	purchase_invoice(frm, cdt, cdn) {
 		const row = locals[cdt][cdn];
 		if (!row.purchase_invoice) return;
 
 		frappe
-			.call(`${SPP_METHOD}.get_invoice_details`, { purchase_invoice: row.purchase_invoice })
+			.call(`${SPA_METHOD}.get_invoice_details`, { purchase_invoice: row.purchase_invoice })
 			.then((r) => {
 				const pi = r.message;
 				frappe.model.set_value(cdt, cdn, {
@@ -103,7 +103,7 @@ function set_intro(frm) {
 	if (frm.doc.docstatus === 1 && frm.doc.payment_status !== "Paid") {
 		frm.set_intro(
 			__(
-				"Payment Entries are created as drafts with this proposal's number as the reference. " +
+				"Payment Entries are created as drafts with this advice's number as the reference. " +
 					"Replace it with the cheque / EFT number, then submit each one."
 			),
 			"blue"
@@ -151,10 +151,10 @@ function get_unpaid_invoices(frm) {
 		primary_action_label: __("Get Invoices"),
 		primary_action(values) {
 			frappe
-				.call(`${SPP_METHOD}.get_unpaid_invoices`, {
+				.call(`${SPA_METHOD}.get_unpaid_invoices`, {
 					company: frm.doc.company,
 					currency: frm.doc.paid_from_account_currency,
-					proposal: frm.is_new() ? null : frm.doc.name,
+					advice: frm.is_new() ? null : frm.doc.name,
 					...values,
 				})
 				.then((r) => {

@@ -4,5 +4,5 @@
 from frappe.model.document import Document
 
 
-class SupplierPaymentProposalInvoice(Document):
+class SupplierPaymentAdviceInvoice(Document):
 	pass

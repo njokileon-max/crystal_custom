@@ -37,7 +37,7 @@
    "fieldname": "naming_series",
    "fieldtype": "Select",
    "label": "Series",
-   "options": "SPP-.YYYY.-",
+   "options": "SPA-.YYYY.-",
    "print_hide": 1,
    "reqd": 1,
    "set_only_once": 1
@@ -55,7 +55,7 @@
    "fieldname": "posting_date",
    "fieldtype": "Date",
    "in_list_view": 1,
-   "label": "Proposal Date",
+   "label": "Advice Date",
    "reqd": 1
   },
   {
@@ -99,7 +99,7 @@
    "fieldname": "invoices",
    "fieldtype": "Table",
    "label": "Invoices",
-   "options": "Supplier Payment Proposal Invoice",
+   "options": "Supplier Payment Advice Invoice",
    "reqd": 1
   },
   {
@@ -191,7 +191,7 @@
    "fieldtype": "Link",
    "label": "Amended From",
    "no_copy": 1,
-   "options": "Supplier Payment Proposal",
+   "options": "Supplier Payment Advice",
    "print_hide": 1,
    "read_only": 1
   }
@@ -201,13 +201,13 @@
  "links": [
   {
    "link_doctype": "Payment Entry",
-   "link_fieldname": "custom_supplier_payment_proposal"
+   "link_fieldname": "custom_supplier_payment_advice"
   }
  ],
- "modified": "2026-10-27 09:00:00.000000",
+ "modified": "2026-11-06 10:00:00.000000",
  "modified_by": "Administrator",
  "module": "Crystal Customizations",
- "name": "Supplier Payment Proposal",
+ "name": "Supplier Payment Advice",
  "naming_rule": "By \"Naming Series\" field",
  "owner": "Administrator",
  "permissions": [
