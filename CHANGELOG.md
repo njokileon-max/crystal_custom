@@ -1,3 +1,10 @@
+# [1.38.0](https://github.com/wanguimbutu/crystal_custom/compare/v1.37.1...v1.38.0) (2026-11-06)
+
+
+### Features
+
+* rename supplier payment proposal to advice, add approval emails ([e4aea9d](https://github.com/wanguimbutu/crystal_custom/commit/e4aea9dd299616ab3ecba0353e90a673a45539f0))
+
 ## [1.37.1](https://github.com/wanguimbutu/crystal_custom/compare/v1.37.0...v1.37.1) (2026-11-06)
 
 
