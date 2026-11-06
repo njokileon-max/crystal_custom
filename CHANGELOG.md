@@ -1,3 +1,10 @@
+## [1.37.1](https://github.com/wanguimbutu/crystal_custom/compare/v1.37.0...v1.37.1) (2026-11-06)
+
+
+### Bug Fixes
+
+* **truck-assignment:** remove dispatched trucks from the page only ([4b50ea6](https://github.com/wanguimbutu/crystal_custom/commit/4b50ea64a06bd1e8751a8c7ec58a2fc178c2bf9b))
+
 # [1.37.0](https://github.com/wanguimbutu/crystal_custom/compare/v1.36.2...v1.37.0) (2026-10-27)
 
 
