@@ -21,12 +21,18 @@ INVOICE_ROW_FIELDS = (
 )
 
 
-class SupplierPaymentProposal(Document):
+class SupplierPaymentAdvice(Document):
 	def validate(self):
 		self.validate_paid_from()
 		self.validate_invoices()
 		self.set_totals()
 		self.validate_rejection_reason()
+
+	def on_update(self):
+		# Frappe won't email approvers for a state it already logged an action
+		# on, so without this a resubmitted advice would reach nobody.
+		if self.get("workflow_state") == "Rejected":
+			frappe.db.delete("Workflow Action", {"reference_doctype": self.doctype, "reference_name": self.name})
 
 	def before_submit(self):
 		# Submit is driven by the workflow's "Approve" action.
@@ -92,24 +98,24 @@ class SupplierPaymentProposal(Document):
 					)
 				)
 
-		self.validate_not_in_other_proposals()
+		self.validate_not_in_other_advices()
 
-	def validate_not_in_other_proposals(self):
-		clashes = get_invoices_in_open_proposals([row.purchase_invoice for row in self.invoices], self.name)
+	def validate_not_in_other_advices(self):
+		clashes = get_invoices_in_open_advices([row.purchase_invoice for row in self.invoices], self.name)
 		if clashes:
 			frappe.throw(
 				"<br>".join(
-					_("{0} is already in open proposal {1}.").format(
-						frappe.bold(invoice), frappe.bold(proposal)
+					_("{0} is already on open advice {1}.").format(
+						frappe.bold(invoice), frappe.bold(advice)
 					)
-					for invoice, proposal in clashes.items()
+					for invoice, advice in clashes.items()
 				),
-				title=_("Invoice Already Proposed"),
+				title=_("Invoice Already on an Advice"),
 			)
 
 	def validate_rejection_reason(self):
 		if self.get("workflow_state") == "Rejected" and not (self.rejection_reason or "").strip():
-			frappe.throw(_("Please enter a Rejection Reason before rejecting this proposal."))
+			frappe.throw(_("Please enter a Rejection Reason before rejecting this advice."))
 
 	def set_totals(self):
 		self.total_amount = sum(flt(row.amount_to_pay) for row in self.invoices)
@@ -122,7 +128,7 @@ class SupplierPaymentProposal(Document):
 	@frappe.whitelist()
 	def create_payment_entries(self):
 		if self.docstatus != 1:
-			frappe.throw(_("Payment Entries can only be created once the proposal is approved."))
+			frappe.throw(_("Payment Entries can only be created once the advice is approved."))
 		frappe.has_permission("Payment Entry", "create", throw=True)
 
 		# One Payment Entry per supplier (and payable account, in the rare case
@@ -137,11 +143,11 @@ class SupplierPaymentProposal(Document):
 
 		created, failed = [], []
 		for rows in groups.values():
-			frappe.db.savepoint("supplier_payment_proposal")
+			frappe.db.savepoint("supplier_payment_advice")
 			try:
 				pe = self.make_payment_entry(rows)
 			except Exception as e:
-				frappe.db.rollback(save_point="supplier_payment_proposal")
+				frappe.db.rollback(save_point="supplier_payment_advice")
 				frappe.clear_last_message()
 				failed.append({"supplier": rows[0].supplier, "error": cstr(e)})
 				continue
@@ -190,7 +196,7 @@ class SupplierPaymentProposal(Document):
 		# Pay exactly what was approved: no early-payment discounts.
 		pe.set("deductions", [])
 		pe.paid_amount = pe.received_amount = total
-		pe.custom_supplier_payment_proposal = self.name
+		pe.custom_supplier_payment_advice = self.name
 
 		pe.set_exchange_rate()
 		pe.set_amounts()
@@ -241,7 +247,7 @@ def allocate_references(references, row):
 
 	if flt(remaining, 2) > 0:
 		frappe.throw(
-			_("{0} no longer has {1} outstanding. Refresh the proposal and approve it again.").format(
+			_("{0} no longer has {1} outstanding. Refresh the advice and approve it again.").format(
 				frappe.bold(row.purchase_invoice),
 				frappe.format_value(row.amount_to_pay, {"fieldtype": "Currency"}),
 			)
@@ -304,7 +310,7 @@ def get_invoice_details(purchase_invoice, check_permission=True):
 
 
 def get_invoice_error(pi, company, currency):
-	"""Return why this invoice can't go on a proposal, or None."""
+	"""Return why this invoice can't go on an advice, or None."""
 	if pi.docstatus != 1:
 		return _("{0} is not submitted.").format(frappe.bold(pi.name))
 	if pi.company != company:
@@ -332,24 +338,24 @@ def is_supplier_blocked_for_payment(supplier):
 	)
 
 
-def get_invoices_in_open_proposals(invoices, exclude_proposal=None):
-	"""Map invoice -> proposal for invoices still waiting on another proposal.
+def get_invoices_in_open_advices(invoices, exclude_advice=None):
+	"""Map invoice -> advice for invoices still waiting on another advice.
 
-	An invoice is "waiting" until its Payment Entry from that proposal is
-	submitted. Rejected and cancelled proposals don't count.
+	An invoice is "waiting" until its Payment Entry from that advice is
+	submitted. Rejected and cancelled advices don't count.
 	"""
 	if not invoices:
 		return {}
 
 	conditions = ""
-	if frappe.get_meta("Supplier Payment Proposal").has_field("workflow_state"):
+	if frappe.get_meta("Supplier Payment Advice").has_field("workflow_state"):
 		conditions = "and ifnull(p.workflow_state, '') != 'Rejected'"
 
 	rows = frappe.db.sql(
 		f"""
 		select i.purchase_invoice, p.name
-		from `tabSupplier Payment Proposal Invoice` i
-		join `tabSupplier Payment Proposal` p on p.name = i.parent
+		from `tabSupplier Payment Advice Invoice` i
+		join `tabSupplier Payment Advice` p on p.name = i.parent
 		left join `tabPayment Entry` pe on pe.name = i.payment_entry
 		where i.purchase_invoice in %(invoices)s
 			and p.name != %(exclude)s
@@ -357,13 +363,13 @@ def get_invoices_in_open_proposals(invoices, exclude_proposal=None):
 			and (pe.name is null or pe.docstatus = 0)
 			{conditions}
 		""",
-		{"invoices": invoices, "exclude": exclude_proposal or ""},
+		{"invoices": invoices, "exclude": exclude_advice or ""},
 	)
 	return dict(rows)
 
 
 @frappe.whitelist()
-def get_unpaid_invoices(company, currency, proposal=None, supplier=None, due_on_or_before=None):
+def get_unpaid_invoices(company, currency, advice=None, supplier=None, due_on_or_before=None):
 	frappe.has_permission("Purchase Invoice", "read", throw=True)
 
 	filters = {
@@ -379,7 +385,7 @@ def get_unpaid_invoices(company, currency, proposal=None, supplier=None, due_on_
 		filters["due_date"] = ("<=", due_on_or_before)
 
 	names = frappe.get_list("Purchase Invoice", filters=filters, order_by="due_date asc", pluck="name")
-	taken = get_invoices_in_open_proposals(names, proposal)
+	taken = get_invoices_in_open_advices(names, advice)
 
 	invoices = []
 	for name in names:
@@ -393,9 +399,9 @@ def get_unpaid_invoices(company, currency, proposal=None, supplier=None, due_on_
 
 
 @frappe.whitelist()
-def make_proposal_from_invoices(invoices):
-	"""Build an unsaved proposal from invoices picked in the Purchase Invoice list."""
-	frappe.has_permission("Supplier Payment Proposal", "create", throw=True)
+def make_advice_from_invoices(invoices):
+	"""Build an unsaved advice from invoices picked in the Purchase Invoice list."""
+	frappe.has_permission("Supplier Payment Advice", "create", throw=True)
 
 	invoices = frappe.parse_json(invoices)
 	details = [get_invoice_details(name) for name in invoices]
@@ -404,7 +410,7 @@ def make_proposal_from_invoices(invoices):
 	if len(companies) > 1:
 		frappe.throw(_("Pick invoices from one company at a time."))
 
-	doc = frappe.new_doc("Supplier Payment Proposal")
+	doc = frappe.new_doc("Supplier Payment Advice")
 	doc.company = companies.pop()
 	doc.payment_date = nowdate()
 	doc.paid_from = frappe.get_cached_value("Company", doc.company, "default_bank_account")
