@@ -21,6 +21,8 @@
   "delivery_regions",
   "section_orders",
   "orders",
+  "delivery_items_section",
+  "delivery_items",
   "allocations_section",
   "allocations",
   "amended_from",
@@ -33,13 +35,21 @@
   "approximate_fuel_cost",
   "actual_fuel_fuelled",
   "route_geojson",
+  "route_provider",
+  "route_computed_at",
   "section_margin_analysis",
   "total_order_value",
   "total_theoretical_cost",
   "col_break_margin",
   "narrowed_gross_profit",
   "narrowed_gross_margin_percentage",
-  "profitability_status"
+  "profitability_status",
+  "section_dispatch_record",
+  "dispatch_source",
+  "dispatched_by",
+  "col_break_dispatch",
+  "dispatched_at",
+  "reconcile_count"
  ],
  "fields": [
   {
@@ -250,12 +260,84 @@
    "label": "Profitability Status",
    "options": "Profitable\nLoss",
    "read_only": 1
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "delivery_items_section",
+   "fieldtype": "Section Break",
+   "label": "Delivered Items (from Delivery Notes)"
+  },
+  {
+   "allow_on_submit": 1,
+   "description": "Every line of the plan's Delivery Notes: what the truck actually carries.",
+   "fieldname": "delivery_items",
+   "fieldtype": "Table",
+   "label": "Delivered Items",
+   "options": "Crystal Truck Plan Delivery Item",
+   "read_only": 1
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "route_provider",
+   "fieldtype": "Select",
+   "label": "Route Engine",
+   "options": "\nGoogle\nHosted",
+   "read_only": 1
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "route_computed_at",
+   "fieldtype": "Datetime",
+   "label": "Route Computed At",
+   "read_only": 1
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "section_dispatch_record",
+   "fieldtype": "Section Break",
+   "label": "Dispatch Record"
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "dispatch_source",
+   "fieldtype": "Select",
+   "label": "Dispatched From",
+   "options": "\nTruck Assignment\nReconcile Dispatch",
+   "read_only": 1
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "dispatched_by",
+   "fieldtype": "Link",
+   "label": "Dispatched By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "col_break_dispatch",
+   "fieldtype": "Column Break"
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "dispatched_at",
+   "fieldtype": "Datetime",
+   "label": "Dispatched At",
+   "read_only": 1
+  },
+  {
+   "allow_on_submit": 1,
+   "default": "0",
+   "description": "How many times Reconcile Dispatch has re-computed this plan.",
+   "fieldname": "reconcile_count",
+   "fieldtype": "Int",
+   "label": "Reconcile Count",
+   "read_only": 1
   }
  ],
  "index_web_pages_for_search": 1,
  "is_submittable": 1,
  "links": [],
- "modified": "2026-09-22 00:00:00.000000",
+ "modified": "2026-11-07 13:30:00.000000",
  "modified_by": "Administrator",
  "module": "Crystal Customizations",
  "name": "Crystal Truck Plan",

@@ -197,6 +197,169 @@ def calculate_route_proxy(coordinates_json):
         return {"error": str(e)}
 
 
+
+# ============================================================================
+# Nexus Batch 12: route engine choice for "Optimize Route" / "Analyse Margins"
+# (Google Routes API or the Hosted engine). Read-only previews: nothing is
+# saved on any document. The Google key is read on the server only and is
+# never returned to the browser.
+# ============================================================================
+@frappe.whitelist()
+def get_routing_status():
+    """
+    What the page's route-engine dialog may offer. Returns only booleans and
+    limits, NEVER the key. Hosted is the default; Google is offered (not
+    greyed out) only when its server key is configured.
+    """
+    from crystal_custom.crystal_customizations import dispatch_engine as engine
+
+    configured = bool(engine.google_server_key())
+    return {
+        'google_configured': configured,
+        'google_max_stops': engine.GOOGLE_MAX_STOPS,
+        'default': engine.PROVIDER_HOSTED,
+        'providers': list(engine.PROVIDERS),
+        'reason': '' if configured else _(
+            "Google routing isn't set up (Nexus App Settings → Google Maps Server API Key)."),
+    }
+
+
+@frappe.whitelist()
+def get_route_preview(coordinates_json, route_provider=None):
+    """
+    Route preview for the Truck Assignment map and margin analysis.
+
+    coordinates_json: [[lng, lat] yard, [lng, lat] stop 1, ..., [lng, lat] yard]
+        (the same payload the page already builds for calculate_route_proxy;
+        a {"coordinates": [...]} object is accepted too).
+    route_provider: 'Hosted' (default) or 'Google'.
+
+    Returns the same GeoJSON FeatureCollection shape the page already draws
+    (features[0].properties.summary.distance / duration, features[0].geometry)
+    plus:
+        waypoint_order: visiting order as indices into the stops that were sent
+                        (yard excluded), one index per stop sent;
+        provider:       the engine that actually ran ('Google' or 'Hosted');
+        warnings:       list of human-readable notes (fallbacks, skipped stops).
+    On failure returns {'error': '...'} (same convention as calculate_route_proxy).
+
+    Same stop coordinates are routed once (several orders for one customer)
+    and expanded back. Identical requests within 10 minutes are served from
+    cache, so pressing the button again doesn't cost another Google request.
+    """
+    import hashlib
+    import json
+    from crystal_custom.crystal_customizations import dispatch_engine as engine
+
+    if not frappe.has_permission('Crystal Truck Plan', 'read'):
+        return {'error': _('You are not permitted to plan truck routes.')}
+
+    try:
+        payload = json.loads(coordinates_json) if isinstance(coordinates_json, str) else coordinates_json
+    except ValueError:
+        return {'error': _('Invalid route coordinates.')}
+    if isinstance(payload, dict):
+        payload = payload.get('coordinates')
+    if not isinstance(payload, (list, tuple)) or len(payload) < 3:
+        return {'error': _('A route needs the yard and at least one stop.')}
+
+    def to_point(pair):
+        # [lng, lat] (GeoJSON order) -> (lat, lng) or None
+        if not isinstance(pair, (list, tuple)) or len(pair) < 2:
+            return None
+        return engine._point(pair[1], pair[0])
+
+    factory = to_point(payload[0]) or engine._factory()
+    if not factory:
+        return {'error': _('The company has no GPS coordinates (Company → custom_latitude / custom_longitude).')}
+
+    stops = list(payload[1:-1])
+    max_stops = 200
+    if len(stops) > max_stops:
+        return {'error': _('Too many stops for one route ({0}); the limit is {1}.').format(len(stops), max_stops)}
+
+    warnings = []
+    unique_points, members, skipped = [], [], []
+    seen = {}
+    for i, pair in enumerate(stops):
+        pt = to_point(pair)
+        if not pt:
+            skipped.append(i)
+            continue
+        spot = (round(pt[0], 6), round(pt[1], 6))
+        if spot not in seen:
+            seen[spot] = len(unique_points)
+            unique_points.append(pt)
+            members.append([])
+        members[seen[spot]].append(i)
+    if skipped:
+        warnings.append(_('{0} stop(s) have no valid location and are left out of the route.').format(len(skipped)))
+    if not unique_points:
+        return {'error': _('No stop has a valid location, so no route can be drawn.')}
+
+    provider = route_provider if route_provider in engine.PROVIDERS else engine.PROVIDER_HOSTED
+    key = ''
+    if provider == engine.PROVIDER_GOOGLE:
+        key = engine.google_server_key()
+        if not key:
+            warnings.append(_("Google routing isn't set up, so the hosted engine was used."))
+            provider = engine.PROVIDER_HOSTED
+        elif len(unique_points) > engine.GOOGLE_MAX_STOPS:
+            warnings.append(_('{0} stops: Google optimises at most {1} stops in one request, so the hosted engine was used.').format(
+                len(unique_points), engine.GOOGLE_MAX_STOPS))
+            provider = engine.PROVIDER_HOSTED
+
+    def cache_key(engine_name):
+        raw = json.dumps([engine_name, factory, unique_points], separators=(',', ':'))
+        return 'nexus_route_preview:' + hashlib.sha256(raw.encode()).hexdigest()
+
+    def from_cache(engine_name):
+        try:
+            hit = frappe.cache().get_value(cache_key(engine_name))
+            return json.loads(hit) if hit else None
+        except Exception:
+            return None
+
+    data = None
+    if provider == engine.PROVIDER_GOOGLE:
+        data = from_cache(provider)
+        if data is None:
+            try:
+                data = engine._route_google(factory, unique_points, key)
+            except Exception as e:
+                frappe.log_error(title='Nexus Route Preview: Google route failed',
+                                 message=f'{e}\n{frappe.get_traceback()}')
+                warnings.append(_('Google routing failed ({0}); the hosted engine was used.').format(str(e)[:160]))
+                provider = engine.PROVIDER_HOSTED
+    if data is None:
+        data = from_cache(provider)
+    if data is None:
+        try:
+            data = engine._route_hosted(factory, unique_points)
+        except Exception as e:
+            frappe.log_error(title='Nexus Route Preview: hosted route failed',
+                             message=f'{e}\n{frappe.get_traceback()}')
+            return {'error': _('The hosted routing engine failed: {0}').format(str(e)[:200])}
+
+    if not isinstance(data, dict) or not data.get('features'):
+        return {'error': _('The routing engine returned no route.')}
+    try:
+        frappe.cache().set_value(cache_key(provider), json.dumps(data, separators=(',', ':')), expires_in_sec=600)
+    except Exception:
+        pass
+
+    order = data.get('waypoint_order')
+    if not isinstance(order, list) or sorted(order) != list(range(len(unique_points))):
+        order = list(range(len(unique_points)))
+    expanded = [stop_index for u in order for stop_index in members[u]] + skipped
+
+    result = dict(data)
+    result['waypoint_order'] = expanded
+    result['provider'] = provider
+    result['warnings'] = warnings
+    return result
+
+
 @frappe.whitelist()
 def get_company_coordinates(company=None):
     if not company:
@@ -458,45 +621,85 @@ def get_active_truck_plans():
         order_by='plan_date DESC',
     )
 
-
 @frappe.whitelist()
-def dispatch_and_restart_truck(plan_name, truck_number, driver_name, capacity_kg, orders_json, new_trip_id):
+def get_dispatch_precheck(trucks_json):
     """
-    Submit the active Draft CTP (recording the dispatched trip with all its orders),
-    then create a fresh Draft CTP for the same truck's next trip.
-    Handles the case where plan_name is missing (legacy truck without a plan).
-    Returns {'submitted_plan': name, 'new_plan': name}.
+    Batch 12. Runs before the Dispatch / Dispatch Selected buttons do anything:
+    finds the submitted Delivery Note(s) of every order on each truck and
+    returns the orders that have none (the page then refuses to dispatch), plus
+    the route-engine options (Google is offered as the default only when one
+    request covers the trip). Nothing is written.
+    trucks_json = [{"truck_number", "plan_name", "orders": [sales order names]}]
     """
     import json
-    orders = json.loads(orders_json) if isinstance(orders_json, str) else orders_json
+    from crystal_custom.crystal_customizations import dispatch_engine as engine
 
-    def _fill_orders(plan_doc, order_list):
-        plan_doc.orders = []
-        for o in order_list:
-            plan_doc.append('orders', {
-                'sales_order':    o.get('name') or o.get('sales_order', ''),
-                'customer_name':  o.get('customer_name', ''),
-                'delivery_region': o.get('delivery_region') or o.get('custom_delivery_region', ''),
-                'grand_total':    float(o.get('grand_total', 0)),
-                'total_net_weight': float(o.get('total_net_weight', 0)),
-            })
-        plan_doc.order_count  = len(order_list)
-        plan_doc.total_weight = sum(float(o.get('total_net_weight', 0)) for o in order_list)
-        plan_doc.total_value  = sum(float(o.get('grand_total', 0))      for o in order_list)
-        regions = sorted({
-            o.get('custom_delivery_region') or o.get('delivery_region', '')
-            for o in order_list
-            if o.get('custom_delivery_region') or o.get('delivery_region')
+    trucks = json.loads(trucks_json) if isinstance(trucks_json, str) else (trucks_json or [])
+    out, max_located = [], 0
+    for t in trucks:
+        plan_name = t.get('plan_name') or ''
+        exclude = plan_name if plan_name and frappe.db.get_value('Crystal Truck Plan', plan_name, 'docstatus') == 0 else None
+        dns, missing, by_so = engine.resolve_delivery_notes(t.get('orders') or [], exclude)
+        summaries = engine.delivery_note_summaries(dns, exclude) if dns else {}
+        located = sum(1 for s in summaries.values() if s['has_location'])
+        max_located = max(max_located, located)
+        out.append({
+            'truck_number': t.get('truck_number'),
+            'ok': not missing,
+            'missing': missing,
+            'located_stops': located,
+            'unlocated_stops': len(summaries) - located,
+            'delivery_notes': [{
+                'name': s['name'], 'customer_name': s.get('customer_name'),
+                'sales_orders': s.get('sales_orders', []), 'grand_total': s.get('grand_total', 0),
+                'total_net_weight': s.get('total_net_weight', 0), 'has_location': s['has_location'],
+            } for s in summaries.values()],
         })
-        plan_doc.delivery_regions = ', '.join(r for r in regions if r)
-        plan_doc.closed_from = 'Truck Assignment'
+    return {
+        'ok': all(t['ok'] for t in out) and bool(out),
+        'trucks': out,
+        'routing': engine.routing_options(max_located),
+    }
 
-    # Get or create the draft plan to submit
+
+@frappe.whitelist()
+def dispatch_and_restart_truck(plan_name, truck_number, driver_name, capacity_kg, orders_json, new_trip_id, route_provider=None):
+    """
+    Submit the active Draft CTP (recording the dispatched trip), then create a
+    fresh Draft CTP for the same truck's next trip.
+
+    Batch 12:
+      * Every order must have a submitted Delivery Note, checked BEFORE anything
+        is written; otherwise nothing happens ("Delivery Note Missing").
+      * The plan's rows are the Delivery Notes (one stop per DN, the DN's
+        value/weight/items: what was actually loaded), with the Sales Order ids.
+      * Route + distance from Google or the Hosted engine (route_provider;
+        Hosted when not given, so an older page keeps working), then fuel and
+        margin, all through dispatch_engine (the same engine Reconcile uses).
+      * The orders' truck flags are set here, inside the same transaction
+        (the page no longer closes them in a separate parallel call).
+    Handles the case where plan_name is missing (legacy truck without a plan).
+    Returns {'submitted_plan', 'new_plan', 'route_provider', 'distance_km', 'warnings'}.
+    """
+    import json
+    from crystal_custom.crystal_customizations import dispatch_engine as engine
+
+    orders = json.loads(orders_json) if isinstance(orders_json, str) else orders_json
+    so_names = [o.get('name') or o.get('sales_order') for o in (orders or []) if (o.get('name') or o.get('sales_order'))]
+    if not so_names:
+        frappe.throw(_('Cannot dispatch an empty truck.'))
+
+    # Get the draft plan to submit (if any)
     plan = None
     if plan_name and frappe.db.exists('Crystal Truck Plan', plan_name):
         candidate = frappe.get_doc('Crystal Truck Plan', plan_name)
         if candidate.docstatus == 0:
             plan = candidate
+
+    # Delivery Note rule — checked before any insert
+    dns, missing, _by_so = engine.resolve_delivery_notes(so_names, plan.name if plan else None)
+    if missing:
+        frappe.throw(engine.missing_dn_message(missing, truck_number), title=_('Delivery Note Missing'))
 
     if plan is None:
         # Legacy truck with no plan (or already-submitted plan) — create one to record this trip
@@ -508,30 +711,17 @@ def dispatch_and_restart_truck(plan_name, truck_number, driver_name, capacity_kg
             'plan_date':    frappe.utils.today(),
         })
         plan.insert(ignore_permissions=True)
+    elif capacity_kg and not plan.capacity_kg:
+        plan.capacity_kg = capacity_kg
 
-    _fill_orders(plan, orders)
-    plan.save(ignore_permissions=True)
-
-    # ── Silent authoritative recompute — route/fuel/margin, regardless of
-    # whatever the client last showed via Optimize Route / Analyse Margins.
-    computed = _compute_route_and_margin_for_dispatch(plan)
-    plan.approximate_total_distance_km    = computed["distance_km"] or 0.0
-    plan.approximate_trip_duration        = computed["duration_seconds"] or 0
-    plan.approximate_fuel_consumption_ltrs = computed["fuel_litres"] or 0.0
-    plan.approximate_fuel_cost            = computed["fuel_cost"] or 0.0
-    plan.route_geojson                    = computed["route_geojson"] or ""
-
-    margin = computed["margin"] or {}
-    plan.total_order_value                     = margin.get("total_order_value", 0.0)
-    plan.total_theoretical_cost                = margin.get("total_theoretical_cost", 0.0)
-    plan.narrowed_gross_profit                 = margin.get("narrowed_gross_profit", 0.0)
-    plan.narrowed_gross_margin_percentage      = margin.get("narrowed_gross_margin_percentage", 0.0)
-    threshold = flt(frappe.db.get_single_value("Crystal Fleet Settings", "narrowed_margin_profitability_threshold")) or 33.0
-    plan.profitability_status = "Profitable" if plan.narrowed_gross_margin_percentage >= threshold else "Loss"
-
+    provider = route_provider if route_provider in engine.PROVIDERS else engine.PROVIDER_HOSTED
+    result = engine.build_dispatch(plan, dns, provider, engine.SOURCE_TRUCK_ASSIGNMENT)
+    plan.closed_from = 'Truck Assignment'
     plan.save(ignore_permissions=True)
     plan.submit()
     submitted_name = plan.name
+
+    engine.sync_sales_orders(plan)
 
     # Create fresh Draft CTP for the truck's next trip
     new_plan = frappe.get_doc({
@@ -545,7 +735,13 @@ def dispatch_and_restart_truck(plan_name, truck_number, driver_name, capacity_kg
     new_plan.insert(ignore_permissions=True)
     frappe.db.commit()
 
-    return {'submitted_plan': submitted_name, 'new_plan': new_plan.name}
+    return {
+        'submitted_plan': submitted_name,
+        'new_plan': new_plan.name,
+        'route_provider': result['route_provider'],
+        'distance_km': result['distance_km'],
+        'warnings': result['warnings'],
+    }
 
 
 @frappe.whitelist()
@@ -802,4 +998,5 @@ def cleanup_stale_completed_orders():
     count = frappe.db.sql("SELECT ROW_COUNT()")[0][0]
     frappe.logger().info(f"cleanup_stale_completed_orders: marked {count} orders as truck_closed")
     return {'updated': count}
+
 

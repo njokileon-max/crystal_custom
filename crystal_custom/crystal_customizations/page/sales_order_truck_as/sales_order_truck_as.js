@@ -1152,11 +1152,15 @@ close_margin_panel() {
 		});
 
 		this.container.find('.ta-bulk-dispatch-trucks').off('click').on('click', () => {
-			const trucks = [...self.selected_trucks];
+			// Batch 12: every truck's orders must have a submitted Delivery Note
+			// (one refusal dialog lists them all and nothing is dispatched), then
+			// the route engine is chosen once for the whole batch. Trips are saved
+			// as Crystal Truck Plans; no Excel here (the download icon does that).
+			const trucks = [...self.selected_trucks].filter(tn => self.orders.some(o => o.custom_truck_number === tn));
 			if (!trucks.length) return;
-			frappe.confirm(
-				__('Dispatch {0} truck(s)? Their orders will be recorded in Trip Plans and the trucks will be ready for the next load.', [trucks.length]),
-				() => {
+			self._dispatch_precheck(trucks, (check) => {
+				if (!check.ok) { self._show_missing_dn_dialog(check); return; }
+				self._choose_route_provider(check, (route_provider) => {
 					self.selected_trucks.clear();
 
 					// Dispatch trucks one at a time, calling load_data() only once at the very end.
@@ -1174,15 +1178,14 @@ close_margin_panel() {
 						const tn = trucks[idx++];
 						const truck_orders = self.orders.filter(o => o.custom_truck_number === tn);
 						if (truck_orders.length) {
-							self.download_manifest(tn);
-							self._close_truck_batch(tn, truck_orders, dispatch_next);
+							self._close_truck_batch(tn, truck_orders, dispatch_next, route_provider);
 						} else {
 							dispatch_next();
 						}
 					};
 					dispatch_next();
-				}
-			);
+				});
+			});
 		});
 
 		this.container.find('.ta-bulk-remove-trucks').off('click').on('click', () => {
@@ -1583,36 +1586,21 @@ close_margin_panel() {
 		const truck_orders = this.orders.filter(o => o.custom_truck_number === truck_number);
 		if (!truck_orders.length) { frappe.msgprint(__('Cannot dispatch an empty truck')); return; }
 
-		const unsubmitted = truck_orders.filter(o => parseInt(o.docstatus) === 0);
-		const msg = unsubmitted.length
-			? __('Truck {0} has {1} unsubmitted order(s). Dispatch anyway? Orders will be recorded and the truck stays available for the next load.', [truck_number, unsubmitted.length])
-			: __('Dispatch truck {0}? {1} orders will be recorded in a Trip Plan and the truck stays available for the next load.', [truck_number, truck_orders.length]);
-
-		frappe.confirm(msg, () => {
-			this.download_manifest(truck_number);
-			this._close_truck_batch(truck_number, truck_orders);
+		// Batch 12: Delivery Note check first (refuses with a dialog), then the
+		// route-engine dialog, which is also the dispatch confirmation. The trip is
+		// saved as a submitted Crystal Truck Plan; no Excel here (the download
+		// icon on the card does that).
+		this._dispatch_precheck([truck_number], (check) => {
+			if (!check.ok) { this._show_missing_dn_dialog(check); return; }
+			this._choose_route_provider(check, (route_provider) => {
+				this._close_truck_batch(truck_number, truck_orders, null, route_provider);
+			});
 		});
 	}
 
-	_close_truck_batch(truck_number, truck_orders, on_done) {
+	_close_truck_batch(truck_number, truck_orders, on_done, route_provider) {
 		const truck_info  = this.available_trucks.find(t => t.truck_number === truck_number) || {};
 		const new_trip_id = this._gen_trip_id();
-
-		const closure = {
-			trip_id:      truck_info.trip_id || '',
-			truck_number,
-			driver_name:  truck_info.driver_name || '',
-			capacity_kg:  truck_info.capacity_kg || 0,
-			closed_at:    frappe.datetime.now_datetime(),
-			order_count:  truck_orders.length,
-			total_weight: truck_orders.reduce((s, o) => s + (o.total_net_weight || 0), 0),
-			total_value:  truck_orders.reduce((s, o) => s + (o.grand_total || 0), 0),
-			orders: truck_orders.map(o => ({
-				name:            o.name,
-				customer_name:   o.customer_name || o.customer,
-				delivery_region: o.custom_delivery_region || '',
-			})),
-		};
 
 		const orders_meta = truck_orders.map(o => ({
 			name:             o.name,
@@ -1622,62 +1610,229 @@ close_margin_panel() {
 			total_net_weight: o.total_net_weight || 0,
 		}));
 
-		// Run both operations in parallel: mark orders closed on SOs + submit/restart CTP
-		let orders_done = false, plan_done = false, new_plan_name = '';
-
-		const finish = () => {
-			if (!orders_done || !plan_done) return;
-
-			// Give truck a fresh trip ID and plan for the next load
-			const truck_idx = this.available_trucks.findIndex(t => t.truck_number === truck_number);
-			if (truck_idx >= 0) {
-				this.available_trucks[truck_idx].trip_id  = new_trip_id;
-				this.available_trucks[truck_idx].plan_name = new_plan_name;
-			}
-			this._save_truck_meta();
-
-			frappe.show_alert({ message: __('Trip dispatched for {0} — ready for next load', [truck_number]), indicator: 'green' });
-
-			if (on_done) {
-				// Caller manages the final reload (e.g., bulk dispatch chains multiple trucks)
-				on_done();
-			} else {
-				// Single dispatch: refresh trip history then reload
-				frappe.call({
-					method: 'crystal_custom.crystal_customizations.page.sales_order_truck_as.sales_order_truck_as.get_truck_history',
-					callback: (hr) => {
-						this.closed_trucks = hr.message || [];
-						this.load_data();
-					},
-					error: () => this.load_data(),
-				});
-			}
+		const reload = () => {
+			frappe.call({
+				method: 'crystal_custom.crystal_customizations.page.sales_order_truck_as.sales_order_truck_as.get_truck_history',
+				callback: (hr) => {
+					this.closed_trucks = hr.message || [];
+					this.load_data();
+				},
+				error: () => this.load_data(),
+			});
 		};
 
-		// 1. Batch-set custom_truck_closed=1 on all Sales Orders
-		frappe.call({
-			method: 'crystal_custom.crystal_customizations.page.sales_order_truck_as.sales_order_truck_as.close_truck_orders',
-			args:   { order_names_json: JSON.stringify(truck_orders.map(o => o.name)) },
-			callback: () => { orders_done = true; finish(); },
-			error:    () => { orders_done = true; finish(); },
-		});
-
-		// 2. Submit the active Crystal Truck Plan + create a new Draft for the next trip
+		// Batch 12: ONE server call. dispatch_and_restart_truck checks the
+		// Delivery Notes, builds the plan, routes, costs, submits AND closes the
+		// orders in a single transaction. If it refuses (e.g. Delivery Note
+		// Missing) nothing is closed and the truck keeps its orders.
 		frappe.call({
 			method: 'crystal_custom.crystal_customizations.page.sales_order_truck_as.sales_order_truck_as.dispatch_and_restart_truck',
 			args: {
-				plan_name:    truck_info.plan_name || '',
-				truck_number: truck_number,
-				driver_name:  truck_info.driver_name || '',
-				capacity_kg:  truck_info.capacity_kg || 0,
-				orders_json:  JSON.stringify(orders_meta),
-				new_trip_id:  new_trip_id,
+				plan_name:      truck_info.plan_name || '',
+				truck_number:   truck_number,
+				driver_name:    truck_info.driver_name || '',
+				capacity_kg:    truck_info.capacity_kg || 0,
+				orders_json:    JSON.stringify(orders_meta),
+				new_trip_id:    new_trip_id,
+				route_provider: route_provider || '',
 			},
-			callback: (r) => { new_plan_name = (r.message || {}).new_plan || ''; plan_done = true; finish(); },
-			error:    () => { plan_done = true; finish(); },
+			freeze: true,
+			freeze_message: __('Dispatching {0}: routing and costing...', [truck_number]),
+			callback: (r) => {
+				const res = r.message || {};
+
+				// Give truck a fresh trip ID and plan for the next load
+				const truck_idx = this.available_trucks.findIndex(t => t.truck_number === truck_number);
+				if (truck_idx >= 0) {
+					this.available_trucks[truck_idx].trip_id  = new_trip_id;
+					this.available_trucks[truck_idx].plan_name = res.new_plan || '';
+				}
+				this._save_truck_meta();
+
+				const warnings = res.warnings || [];
+				frappe.show_alert({
+					message: __('Trip dispatched for {0} ({1} route, {2} km) — ready for next load',
+						[truck_number, res.route_provider || __('no'), (res.distance_km || 0).toFixed(1)]),
+					indicator: warnings.length ? 'orange' : 'green',
+				}, 8);
+				if (warnings.length && !on_done) {
+					frappe.msgprint({
+						title: __('Dispatched with notes: {0}', [truck_number]),
+						indicator: 'orange',
+						message: `<ul>${warnings.map(w => `<li>${frappe.utils.escape_html(w)}</li>`).join('')}</ul>`,
+					});
+				}
+
+				if (on_done) on_done();   // bulk dispatch chains the next truck
+				else reload();
+			},
+			error: () => {
+				// The server already showed why (e.g. Delivery Note Missing). Nothing was closed.
+				if (on_done) on_done();
+				else reload();
+			},
 		});
 	}
 
+	// ── Nexus Batch 12: Delivery Note check + route engine choice ──────────────
+
+	_dispatch_precheck(truck_numbers, done) {
+		const trucks = truck_numbers.map(tn => {
+			const info = this.available_trucks.find(t => t.truck_number === tn) || {};
+			return {
+				truck_number: tn,
+				plan_name: info.plan_name || '',
+				orders: this.orders.filter(o => o.custom_truck_number === tn).map(o => o.name),
+			};
+		}).filter(t => t.orders.length);
+		if (!trucks.length) { frappe.msgprint(__('Cannot dispatch an empty truck')); return; }
+		frappe.call({
+			method: 'crystal_custom.crystal_customizations.page.sales_order_truck_as.sales_order_truck_as.get_dispatch_precheck',
+			args: { trucks_json: JSON.stringify(trucks) },
+			freeze: true,
+			freeze_message: __('Checking Delivery Notes...'),
+			callback: (r) => { if (r.message) done(r.message); },
+		});
+	}
+
+	_show_missing_dn_dialog(check) {
+		const esc = frappe.utils.escape_html;
+		const blocks = (check.trucks || []).filter(t => !t.ok).map(t => `
+			<div style="margin-bottom:12px;">
+				<b>${esc(t.truck_number || '')}</b>
+				<table class="table table-bordered table-sm small" style="margin-top:6px;">
+					<thead><tr><th>${__('Sales Order')}</th><th>${__('Customer')}</th><th>${__('Reason')}</th></tr></thead>
+					<tbody>${(t.missing || []).map(m => `
+						<tr>
+							<td><a href="/app/sales-order/${encodeURIComponent(m.sales_order)}" target="_blank">${esc(m.sales_order)}</a></td>
+							<td>${esc(m.customer_name || '')}</td>
+							<td>${esc(m.reason || '')}</td>
+						</tr>`).join('')}
+					</tbody>
+				</table>
+			</div>`).join('');
+		frappe.msgprint({
+			title: __('Delivery Note Missing'),
+			indicator: 'red',
+			wide: true,
+			message: `<p>${__('Nothing was dispatched. Every order must have a <b>submitted Delivery Note</b> (the proof of what was loaded) before its truck can be dispatched.')}</p>
+				${blocks}
+				<p class="text-muted small">${__('Submit the Delivery Note with the Vehicle No, or remove the order from the truck, then dispatch again.')}</p>`,
+		});
+	}
+
+	_route_engine_dialog(opts, on_choose) {
+		// One dialog for every route-engine choice (Dispatch, Optimize Route,
+		// Analyse Margins). Google is greyed out (disabled) unless it can be used.
+		const esc = frappe.utils.escape_html;
+		const google_ok = !!opts.google_available;
+		const def = (opts.default_provider === 'Google' && google_ok) ? 'Google' : 'Hosted';
+		const group = 'nx-route-engine-' + frappe.utils.get_random(8);
+		const card = 'display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border:1px solid #e2e8f0;border-radius:6px;margin-bottom:8px;';
+		const html = `${opts.intro_html || ''}
+			<div class="nx-route-engine-choice">
+				<label style="${card}cursor:pointer;">
+					<input type="radio" name="${group}" value="Hosted" ${def === 'Hosted' ? 'checked' : ''} style="margin-top:3px;">
+					<span><b>${__('Hosted (Nexus server)')}</b><br>
+					<span class="small text-muted">${esc(opts.hosted_note || __('Default. No per-request cost.'))}</span></span>
+				</label>
+				<label style="${card}${google_ok ? 'cursor:pointer;' : 'opacity:.55;cursor:not-allowed;background:#f8fafc;'}">
+					<input type="radio" name="${group}" value="Google" ${def === 'Google' ? 'checked' : ''} ${google_ok ? '' : 'disabled'} style="margin-top:3px;">
+					<span><b>${__('Google Maps')}</b><br>
+					<span class="small text-muted">${esc(opts.google_reason || '')}</span></span>
+				</label>
+			</div>`;
+		const d = new frappe.ui.Dialog({
+			title: opts.title || __('Route Engine'),
+			fields: [{ fieldtype: 'HTML', fieldname: 'engine_html', options: html }],
+			primary_action_label: opts.primary_label || __('Continue'),
+			primary_action: () => {
+				const v = d.$wrapper.find(`input[name="${group}"]:checked`).val() || 'Hosted';
+				if (v === 'Google' && !google_ok) return;
+				d.hide();
+				on_choose(v);
+			},
+		});
+		d.show();
+	}
+
+	_choose_route_provider(check, on_choose) {
+		// Dispatch: the engine dialog is also the confirmation (it lists what
+		// will be dispatched). The server suggests the default (Google only when
+		// one request covers the trip).
+		const esc = frappe.utils.escape_html;
+		const routing = check.routing || {};
+		const trucks = check.trucks || [];
+		const rows = trucks.map(t => {
+			const value = (t.delivery_notes || []).reduce((s, d) => s + (d.grand_total || 0), 0);
+			const weight = (t.delivery_notes || []).reduce((s, d) => s + (d.total_net_weight || 0), 0);
+			return `<tr>
+				<td><b>${esc(t.truck_number || '')}</b></td>
+				<td class="text-right">${(t.delivery_notes || []).length}</td>
+				<td class="text-right">${t.located_stops || 0}${t.unlocated_stops ? ` <span class="text-warning">(+${t.unlocated_stops} ${__('no GPS')})</span>` : ''}</td>
+				<td class="text-right">${weight.toFixed(1)} kg</td>
+				<td class="text-right">${format_currency(value, null, 0)}</td>
+			</tr>`;
+		}).join('');
+		this._route_engine_dialog({
+			title: trucks.length > 1 ? __('Dispatch {0} Trucks', [trucks.length]) : __('Dispatch {0}', [trucks[0] ? trucks[0].truck_number : '']),
+			intro_html: `<p class="small text-muted">${__('Each Delivery Note becomes one stop with what was actually delivered. Route, distance, fuel and margin are computed now, the trip is saved as a Crystal Truck Plan and the truck stays available for its next load.')}</p>
+				<table class="table table-bordered table-sm small">
+					<thead><tr><th>${__('Truck')}</th><th class="text-right">${__('Delivery Notes')}</th><th class="text-right">${__('Located')}</th><th class="text-right">${__('Weight')}</th><th class="text-right">${__('Value')}</th></tr></thead>
+					<tbody>${rows}</tbody>
+				</table>
+				<div class="small" style="font-weight:600;margin:4px 0 8px;">${__('Route & distance engine')}</div>`,
+			default_provider: routing.default || 'Hosted',
+			google_available: !!routing.google_available,
+			google_reason: routing.reason || '',
+			primary_label: __('Dispatch'),
+		}, on_choose);
+	}
+
+	_choose_preview_provider(orders, title, on_choose) {
+		// Optimize Route / Analyse Margins: Hosted is the default. Google is
+		// offered only when its server key is set and one request covers the
+		// stops. No located stop -> no routing needed, so no dialog.
+		const spots = new Set();
+		(orders || []).forEach(o => {
+			const lat = parseFloat(o.custom_latitude), lng = parseFloat(o.custom_longitude);
+			if (lat && lng) spots.add(lat.toFixed(6) + ',' + lng.toFixed(6));
+		});
+		if (!spots.size) { on_choose('Hosted'); return; }
+		frappe.call({
+			method: 'crystal_custom.crystal_customizations.page.sales_order_truck_as.sales_order_truck_as.get_routing_status',
+			callback: (r) => {
+				const s = r.message || {};
+				const max = s.google_max_stops || 25;
+				const google_available = !!s.google_configured && spots.size <= max;
+				const google_reason = !s.google_configured
+					? (s.reason || __("Google routing isn't set up."))
+					: spots.size > max
+						? __('{0} stops: Google optimises at most {1} stops in one request.', [spots.size, max])
+						: __('Latest roads and traffic-free timing. 1 request for {0} stop(s).', [spots.size]);
+				this._route_engine_dialog({
+					title: title,
+					intro_html: `<p class="small text-muted">${__('{0} located stop(s). Choose the engine for the route and distance.', [spots.size])}</p>`,
+					default_provider: s.default || 'Hosted',
+					google_available: google_available,
+					google_reason: google_reason,
+					primary_label: __('Continue'),
+				}, on_choose);
+			},
+			error: () => on_choose('Hosted'),
+		});
+	}
+
+	_show_route_notes(data) {
+		// Tells the user which engine actually ran, plus any fallback notes.
+		if (!data) return;
+		const warnings = data.warnings || [];
+		frappe.show_alert({
+			message: __('Route by {0}', [data.provider || 'Hosted']) +
+				(warnings.length ? ': ' + warnings.map(w => frappe.utils.escape_html(w)).join(' ') : ''),
+			indicator: warnings.length ? 'orange' : 'green',
+		}, warnings.length ? 10 : 5);
+	}
 
 	reopen_truck(idx) {
 		const ct = this.closed_trucks[idx];
@@ -1836,24 +1991,35 @@ ${driver_cols}
 // ── Spatial / Routing Logic (Leaflet + Nexus Backend) ─────────────────────
 
 	open_route_optimizer(title, orders, vehicle_type, truck_number = null) {
-		this.page.wrapper.find('.nexus-route-panel').addClass('active');
-		this.page.wrapper.find('.nexus-panel-backdrop').addClass('active');
-		this.page.wrapper.find('.nexus-panel-title').text(title);
+		// Batch 12: choose the route engine first (Hosted default; Google only
+		// when its server key is set). While the route panel stays open the
+		// choice is reused, so the "Include Truck's Current Load" checkbox
+		// (which re-runs the route by itself) doesn't ask again. Closing the
+		// panel resets it: the next Optimize Route asks again.
+		const panel_open = this.page.wrapper.find('.nexus-route-panel').hasClass('active');
+		const run = (route_provider) => {
+			this._route_preview_provider = route_provider;
+			this.page.wrapper.find('.nexus-route-panel').addClass('active');
+			this.page.wrapper.find('.nexus-panel-backdrop').addClass('active');
+			this.page.wrapper.find('.nexus-panel-title').text(title);
 
-		$('#nx-dist').html('<i class="fa fa-spinner fa-spin"></i>');
-		$('#nx-dur').html('<i class="fa fa-spinner fa-spin"></i>');
-		$('#nx-fuel-cost').html('<i class="fa fa-spinner fa-spin"></i>');
-		$('.nexus-fuel-banner').show();
+			$('#nx-dist').html('<i class="fa fa-spinner fa-spin"></i>');
+			$('#nx-dur').html('<i class="fa fa-spinner fa-spin"></i>');
+			$('#nx-fuel-cost').html('<i class="fa fa-spinner fa-spin"></i>');
+			$('.nexus-fuel-banner').show();
 
-		frappe.require([
-			"/assets/nexus_supply_chain/leaflet/leaflet.css",
-			"/assets/nexus_supply_chain/leaflet/leaflet.js"
-		], () => {
-			this._execute_route_mapping(orders, vehicle_type, 'nexus-leaflet-map', truck_number);
-		});
+			frappe.require([
+				"/assets/nexus_supply_chain/leaflet/leaflet.css",
+				"/assets/nexus_supply_chain/leaflet/leaflet.js"
+			], () => {
+				this._execute_route_mapping(orders, vehicle_type, 'nexus-leaflet-map', truck_number, route_provider);
+			});
+		};
+		if (panel_open && this._route_preview_provider) { run(this._route_preview_provider); return; }
+		this._choose_preview_provider(orders, __('Optimize Route'), run);
 	}
 
-	_execute_route_mapping(orders, vehicle_type, container_id, truck_number = null) {
+	_execute_route_mapping(orders, vehicle_type, container_id, truck_number = null, route_provider = 'Hosted') {
 		frappe.call({
 			method: 'crystal_custom.crystal_customizations.page.sales_order_truck_as.sales_order_truck_as.get_company_coordinates',
 			callback: (r) => {
@@ -1892,15 +2058,18 @@ ${driver_cols}
 				valid_stops.forEach(o => coordinates.push([parseFloat(o.custom_longitude), parseFloat(o.custom_latitude)]));
 				coordinates.push([factory_lng, factory_lat]);
 
+				// Batch 12: Google or Hosted (server-side; the Google key never
+				// reaches the browser). Same GeoJSON shape as before.
 				frappe.call({
-					method: 'crystal_custom.crystal_customizations.page.sales_order_truck_as.sales_order_truck_as.calculate_route_proxy',
-					args: { coordinates_json: JSON.stringify(coordinates) },
+					method: 'crystal_custom.crystal_customizations.page.sales_order_truck_as.sales_order_truck_as.get_route_preview',
+					args: { coordinates_json: JSON.stringify(coordinates), route_provider: route_provider || 'Hosted' },
 					callback: (route_r) => {
 						const data = route_r.message;
 						if (!data || data.error) {
 							frappe.msgprint("Map Engine Error: " + (data ? data.error : "Unknown error"));
 							return;
 						}
+						this._show_route_notes(data);
 
 						let ordered_stops = valid_stops;
 						if (Array.isArray(data.waypoint_order) && data.waypoint_order.length === valid_stops.length) {
@@ -1991,22 +2160,27 @@ ${driver_cols}
 	// ── Margin Analysis Logic (mirrors the routing logic above, opposite panel) ─
 
 	open_margin_analyzer(title, orders, vehicle_type, truck_number = null) {
-		this.page.wrapper.find('.nexus-margin-panel-title').text(title);
-		this.open_margin_panel();
-		$('#nexus-margin-content').html(`
-			<div class="text-center py-5">
-				<i class="fa fa-spinner fa-spin fa-2x text-primary"></i>
-				<p class="text-muted mt-3">Computing margin analysis...</p>
-			</div>
-		`);
-		this._current_margin_orders = orders || [];
-		this._current_margin_vehicle_type = vehicle_type || null;
-		this._current_margin_truck_number = truck_number || null;
-		this.margin_panel.find('.btn-item-wise-analysis').prop('disabled', !(orders && orders.length));
-		this._execute_margin_analysis(orders, vehicle_type, truck_number);
+		// Batch 12: choose the route engine first (Hosted default; Google only
+		// when its server key is set). The distance comes from that engine;
+		// the margin calculation itself is unchanged.
+		this._choose_preview_provider(orders || [], __('Analyse Margins'), (route_provider) => {
+			this.page.wrapper.find('.nexus-margin-panel-title').text(title);
+			this.open_margin_panel();
+			$('#nexus-margin-content').html(`
+				<div class="text-center py-5">
+					<i class="fa fa-spinner fa-spin fa-2x text-primary"></i>
+					<p class="text-muted mt-3">Computing margin analysis...</p>
+				</div>
+			`);
+			this._current_margin_orders = orders || [];
+			this._current_margin_vehicle_type = vehicle_type || null;
+			this._current_margin_truck_number = truck_number || null;
+			this.margin_panel.find('.btn-item-wise-analysis').prop('disabled', !(orders && orders.length));
+			this._execute_margin_analysis(orders, vehicle_type, truck_number, route_provider);
+		});
 	}
 
-	_execute_margin_analysis(orders, vehicle_type, truck_number) {
+	_execute_margin_analysis(orders, vehicle_type, truck_number, route_provider = 'Hosted') {
 		if (!orders.length) {
 			$('#nexus-margin-content').html(`<div class="alert alert-warning mt-2">No orders selected for margin analysis.</div>`);
 			return;
@@ -2058,12 +2232,14 @@ ${driver_cols}
 				valid_stops.forEach(o => coordinates.push([parseFloat(o.custom_longitude), parseFloat(o.custom_latitude)]));
 				coordinates.push([factory_lng, factory_lat]);
 
+				// Batch 12: distance from the chosen engine (Google or Hosted).
 				frappe.call({
-					method: 'crystal_custom.crystal_customizations.page.sales_order_truck_as.sales_order_truck_as.calculate_route_proxy',
-					args: { coordinates_json: JSON.stringify(coordinates) },
+					method: 'crystal_custom.crystal_customizations.page.sales_order_truck_as.sales_order_truck_as.get_route_preview',
+					args: { coordinates_json: JSON.stringify(coordinates), route_provider: route_provider || 'Hosted' },
 					callback: (route_r) => {
 						const data = route_r.message;
 						if (!data || data.error) { run_analysis(null); return; }
+						this._show_route_notes(data);
 						const distance_km = data.features[0].properties.summary.distance / 1000;
 						run_analysis(distance_km);
 					},

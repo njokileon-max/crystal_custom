@@ -6,10 +6,15 @@
  "engine": "InnoDB",
  "field_order": [
   "sales_order",
+  "delivery_note",
   "customer_name",
   "delivery_region",
   "grand_total",
-  "total_net_weight"
+  "total_net_weight",
+  "customer",
+  "sales_orders",
+  "latitude",
+  "longitude"
  ],
  "fields": [
   {
@@ -19,6 +24,16 @@
    "label": "Sales Order",
    "options": "Sales Order",
    "reqd": 1
+  },
+  {
+   "description": "The Delivery Note this stop delivers (proof of what was loaded). Filled by Dispatch / Reconcile Dispatch.",
+   "fieldname": "delivery_note",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Delivery Note",
+   "options": "Delivery Note",
+   "read_only": 1,
+   "search_index": 1
   },
   {
    "fieldname": "customer_name",
@@ -47,12 +62,40 @@
    "in_list_view": 1,
    "label": "Weight (kg)",
    "read_only": 1
+  },
+  {
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "label": "Customer ID",
+   "options": "Customer",
+   "read_only": 1
+  },
+  {
+   "description": "Every Sales Order on the Delivery Note (one per line).",
+   "fieldname": "sales_orders",
+   "fieldtype": "Small Text",
+   "label": "Sales Orders",
+   "read_only": 1
+  },
+  {
+   "description": "Customer location used for the route (custom_latitude).",
+   "fieldname": "latitude",
+   "fieldtype": "Data",
+   "label": "Latitude",
+   "read_only": 1
+  },
+  {
+   "description": "Customer location used for the route (custom_longitude).",
+   "fieldname": "longitude",
+   "fieldtype": "Data",
+   "label": "Longitude",
+   "read_only": 1
   }
  ],
  "index_web_pages_for_search": 1,
  "istable": 1,
  "links": [],
- "modified": "2026-06-18 00:00:00.000000",
+ "modified": "2026-10-31 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Crystal Customizations",
  "name": "Crystal Truck Plan Order",
